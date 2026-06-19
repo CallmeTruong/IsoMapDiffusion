@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { TILE, TILE_SIZE_M, QUADRANT_M, CELL_SIZE_M, PATHS, BILLING } from '../config.mjs';
+import { TILE, TILE_SIZE_M, QUADRANT_M, CELL_SIZE_M, PATHS } from '../config.mjs';
 import { findTile, listTiles, tileBounds } from '../tile/tile_io.mjs';
 import { tileIndexToLatLng } from '../tile/coords.mjs';
 
@@ -104,11 +104,6 @@ export function buildGenerationConfig({ outputDir, seedLat, seedLng, cfg, manife
       total_tiles_expected: bounds.expectedTiles,
       tiles_rendered: rendered,
       tiles_total: allTiles.length,
-    },
-    billing: {
-      free_sessions: BILLING.freeSessionsPerMonth,
-      billable_sessions: Math.max(0, sessionCount - BILLING.freeSessionsPerMonth),
-      cost_per_1000_sessions: BILLING.costPer1000Sessions,
     },
     config_version: 2,
     generated_at: new Date().toISOString(),
