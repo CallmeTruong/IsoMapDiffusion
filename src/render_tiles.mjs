@@ -269,7 +269,6 @@ console.log('\n\n=== Summary ===');
 console.log('  Tiles rendered: ' + totalDone);
 console.log('  Failed: ' + totalFail);
 console.log('  Retried: ' + totalRetry);
-console.log('  Sessions: ' + totalSess + ' (billable: ' + billable + ')');
 console.log('  Elapsed: ' + Math.floor(elapsed/60) + 'm' + Math.round(elapsed%60) + 's');
 console.log('  Rate: ' + (totalDone / elapsed).toFixed(2) + ' tiles/s');
 

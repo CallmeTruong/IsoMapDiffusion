@@ -23,11 +23,11 @@ function escapeJsString(s) {
  * @param {Object} cfg - Render configuration
  * @returns {string} - Complete HTML string
  */
-export function makeCesiumHTML(apikeyOrToken, cfg) {
-    let ttileJs;
+export function makeCesiumHTML(apiKeyOrToken, cfg) {
+    let tileJs;
     let resetIonToken = false;
     if (typeof apiKeyOrToken == 'string') {
-        const safeKey = escapeJsString(apikeyOrToken);
+        const safeKey = escapeJsString(apiKeyOrToken);
         tilesetJs = `
         tileset = await Cesium.createGooglePhotorealistic3DTileset({
             key: '${safeKey}',
