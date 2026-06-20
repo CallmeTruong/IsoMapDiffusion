@@ -16,13 +16,15 @@ const ARGS = Object.fromEntries(
 const options = {
   districtsDir: ARGS.districts
     ? path.resolve(PROJECT_ROOT, ARGS.districts)
-    : path.join(PROJECT_ROOT, 'districts'),
+    : path.resolve(PROJECT_ROOT, PATHS.districts),
+
   waterFile: ARGS.water
     ? path.resolve(PROJECT_ROOT, ARGS.water)
-    : path.join(PROJECT_ROOT, 'geo', 'water.geojson'),
+    : path.resolve(PROJECT_ROOT, PATHS.water),
+
   infraFile: ARGS.infra
     ? path.resolve(PROJECT_ROOT, ARGS.infra)
-    : path.join(PROJECT_ROOT, 'geo', 'infra.geojson'),
+    : path.resolve(PROJECT_ROOT, PATHS.infra),
   cellSizeKm: Number(ARGS.cell ?? GRID.cellSizeKm),
   minWaterM2: Number(ARGS.minwater ?? GRID.minWaterM2),
   outputDir: ARGS.out
