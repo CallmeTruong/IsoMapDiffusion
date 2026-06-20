@@ -91,8 +91,8 @@ export function loadPolygonFile(filePath, minArea = 0) {
 
 /**
  * Load any geometry file
+*/
 export function loadAnyGeomFile(filePath) {
- */
   if (!fs.existsSync(filePath)) return [];
   const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
   return raw.features.filter(f => f.geometry);

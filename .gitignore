@@ -1,1 +1,9 @@
 .gitignore
+.env
+districts
+geo
+package-lock.json
+package.json
+render_errors_w0.log
+node_modules
+output
