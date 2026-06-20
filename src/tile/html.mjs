@@ -24,7 +24,7 @@ function escapeJsString(s) {
  * @returns {string} - Complete HTML string
  */
 export function makeCesiumHTML(apiKeyOrToken, cfg) {
-    let tileJs;
+    let tilesetJs;
     let resetIonToken = false;
     if (typeof apiKeyOrToken == 'string') {
         const safeKey = escapeJsString(apiKeyOrToken);
