@@ -1,7 +1,7 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { generateGrid } from './grid/index.mjs';
-import { GRID } from './config.mjs';
+import { GRID, PATHS } from './config.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
