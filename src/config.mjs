@@ -47,7 +47,7 @@ const DEFAULTS = {
     stableHits:       5,
     varianceThr:      250,
 
-    // Blank/blurry thresholds (cho analyzeCanvas)
+    // Blank/blurry thresholds (for analyzeCanvas)
     blankVarianceThr: 800,
     blankEdgeThr:     0.15,
     blankMeanThr:     [60, 110],
