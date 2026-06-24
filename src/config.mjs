@@ -76,7 +76,7 @@ const DEFAULTS = {
     sessionMaxMs:       10 * 60 * 1000,  // min per worker session
     maxRetry:           2,
 
-    // Sample grid cho analyzeCanvas (WebGL readPixels)
+    // Sample grid for analyzeCanvas (WebGL readPixels)
     sampleGridSize:     20,     // 20×20 = 400 samples
     edgeGradThr:        30,     // gradient threshold per channel (0-255)
 
