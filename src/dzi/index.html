@@ -36,11 +36,17 @@
 
             showNavigator: true,                
             navigatorPosition: "BOTTOM_RIGHT",
-            animationTime: 0.5,
+            animationTime: 0.3,
             blendTime: 0.1,
             constrainDuringPan: true,
             maxZoomPixelRatio: 2,
-            visibilityRatio: 0.5
+            visibilityRatio: 0.5,
+            imageLoaderLimit: 8,
+            maxImageCacheCount: 1000,
+            timeout: 30000,
+
+            immediateRender: false,
+            minPixelRatio: 0.5,
         });
     </script>
 

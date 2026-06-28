@@ -47,15 +47,22 @@ const DEFAULTS = {
     stableHits:       5,
     varianceThr:      250,
 
-    // Blank/blurry thresholds (cho analyzeCanvas)
-    blankVarianceThr: 800,
-    blankEdgeThr:     0.15,
+    // Blank/blurry thresholds (for analyzeCanvas)
+    blankVarianceThr: 100,
+    blankEdgeThr:     0.08,
     blankMeanThr:     [60, 110],
-    blankSizeKb:      30,
-    blankMeanRThr:    250,    // > 250 = skydome / flat white
+    blankSizeKb:      5,
+    blankMeanRThr:    300,
 
     // Retry
     maxRetry:         3,
+
+    // 2D Fallback (for tiles where 3D render fails/blank)
+    fallback: {
+      enabled:        true,    // Enable 2D satellite fallback
+      provider:      'esri',   // esri | mapbox | osm
+      maxRetries3D:  2,       // Max 3D retries before fallback
+    },
 
     // Worker session
     sessionMaxMs:     2.9 * 60 * 60 * 1000,
@@ -76,7 +83,7 @@ const DEFAULTS = {
     sessionMaxMs:       10 * 60 * 1000,  // min per worker session
     maxRetry:           2,
 
-    // Sample grid cho analyzeCanvas (WebGL readPixels)
+    // Sample grid for analyzeCanvas (WebGL readPixels)
     sampleGridSize:     20,     // 20×20 = 400 samples
     edgeGradThr:        30,     // gradient threshold per channel (0-255)
 
@@ -260,6 +267,7 @@ export const QUALITY = _cfg.QUALITY;
 export const GEO = _cfg.GEO;
 export const CESIUM = _cfg.CESIUM;
 export const SEEDS = _cfg.SEEDS;
+export const FALLBACK = _cfg.TILE?.fallback ?? { enabled: false };
 export const DEFAULTS_ALL = DEFAULTS;
 
 // ─── Derived constants (backward compat) ──────────────────────────────

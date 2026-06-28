@@ -135,6 +135,20 @@ export async function runWorker(workerData) {
   const report = msg => parentPort.postMessage({ type: 'progress', workerId, msg });
   const done   = stats => parentPort.postMessage({ type: 'done', workerId, stats });
 
+  // Graceful shutdown flag - when true, finish current tile but don't start new ones
+  let draining = false;
+  let currentTile = null;
+
+  // Listen for messages from main thread (e.g., flush_checkpoint on shutdown)
+  parentPort?.on('message', msg => {
+    if (msg?.type === 'flush_checkpoint') {
+      console.log(`[Worker ${workerId}] Draining, finishing current tile...`);
+      draining = true;
+      // If not currently processing a tile, send done immediately
+      // If processing, we'll exit after current tile completes
+    }
+  });
+
   const { default: puppeteer } = await import('puppeteer');
 
   const browser = await puppeteer.launch({
@@ -202,6 +216,16 @@ export async function runWorker(workerData) {
       continue;
     }
 
+    // Check if we're draining - skip remaining tiles after current one finishes
+    if (draining && currentTile === null) {
+      currentTile = tile;
+      console.log(`[Worker ${workerId}] Draining: finishing tile (${tile.qx},${tile.qy}) then stopping`);
+    }
+    if (draining && currentTile !== tile) {
+      console.log(`[Worker ${workerId}] Skipping tile (${tile.qx},${tile.qy}) due to drain`);
+      continue;
+    }
+
     if (Date.now() - sessionStart >= sessionMaxMs && pageReady) {
       report('Restarting page (full GPU reset)...');
       pageReady = false;
@@ -214,6 +238,23 @@ export async function runWorker(workerData) {
     }
 
     const result = await renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blankSizeKb, maxRetry, parentPort, workerId);
+
+    // After this tile completes, if draining, finish up
+    if (draining && currentTile === tile) {
+      console.log(`[Worker ${workerId}] Tile (${tile.qx},${tile.qy}) done, exiting gracefully`);
+      if (result.ok) {
+        doneCount++;
+        parentPort?.postMessage({
+          type: 'tile_done', workerId,
+          qx: tile.qx, qy: tile.qy,
+          variance: result.variance, renderMs: result.renderMs,
+        });
+      }
+      await browser.close();
+      cleanup();
+      done({ doneCount, failCount, retryCount, sessionCount });
+      return; // Exit worker
+    }
 
     if (result.ok) {
       doneCount++;
