@@ -1,0 +1,51 @@
+# Default Training Configuration
+# Adjust parameters as needed
+
+# Training
+num_epochs: 5
+learning_rate: 1.0e-4
+train_batch_size: 1
+gradient_accumulation_steps: 4
+max_grad_norm: 1.0
+seed: 42
+
+# LoRA
+lora_rank: 32
+lora_alpha: 64
+lora_dropout: 0.0
+init_type: gaussian
+lora_base_model: dit
+
+# Dataset
+dataset:
+  base_path: ./data
+  metadata_path: ./data/metadata.csv
+  image_column: image
+  control_image_column: control_image
+  prompt_column: prompt
+  max_pixels: 1048576
+  repeat: 1
+  num_workers: 8
+
+# Model
+model:
+  model_id: Qwen/Qwen-Image-Edit
+  torch_dtype: bfloat16
+
+# Output
+output_dir: ./output/lora
+experiment_name: isometric_lora
+
+# Checkpointing
+checkpointing_steps: 500
+checkpoints_total_limit: 3
+
+# Validation
+validation: true
+validation_steps: 100
+num_validation_images: 4
+
+# Optimization
+use_gradient_checkpointing: true
+mixed_precision: bf16
+enable_xformers: false
