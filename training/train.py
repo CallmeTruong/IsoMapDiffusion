@@ -639,9 +639,16 @@ Examples:
         
         lora_config = LoRAConfig(rank=args.lora_rank, alpha=args.lora_alpha)
         
+        # Auto-detect base_path from dataset-path if not explicitly provided
+        if args.dataset_path:
+            # base_path defaults to the directory containing the CSV
+            base_path = args.base_path if args.base_path != "./data" else str(Path(args.dataset_path).parent)
+        else:
+            base_path = args.base_path
+        
         dataset_config = DatasetConfig(
-            base_path=args.base_path,
-            metadata_path=args.dataset_path or f"{args.base_path}/metadata.csv",
+            base_path=base_path,
+            metadata_path=args.dataset_path or f"{base_path}/metadata.csv",
         )
         
         # Create training config with mixed precision based on dtype
