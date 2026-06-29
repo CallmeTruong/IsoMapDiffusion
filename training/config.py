@@ -25,7 +25,7 @@ class ModelConfig:
     """Base model configuration."""
     
     # HuggingFace model path
-    model_id: str = "Qwen/Qwen-Image-Edit"
+    model_id: str = "ovedrive/qwen-image-edit-4bit"  # 20B quantized model, ~20GB VRAM
     
     # Model variant (for Qwen-Image-Edit-2511)
     model_variant: Optional[str] = None
