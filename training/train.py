@@ -214,6 +214,9 @@ class LoRATrainer:
         self.transformer = self.pipeline.transformer
         self.scheduler = self.pipeline.scheduler
         
+        # Setup latent projection (VAE latent channels -> transformer expected channels)
+        self._setup_latent_projection()
+        
         # Enable gradient checkpointing to save memory
         if hasattr(self.transformer, 'gradient_checkpointing_enable'):
             self.transformer.gradient_checkpointing_enable()
@@ -225,6 +228,29 @@ class LoRATrainer:
         
         logger.info(f"  Model loaded to {self.accelerator.device}")
         
+    def _setup_latent_projection(self):
+        """Setup projection from VAE latent space to transformer expected channels."""
+        vae_latent_channels = self.vae.config.latent_channels  # typically 16
+        transformer_in_channels = self.transformer.config.in_channels  # typically 64
+        
+        logger.info(f"  VAE latent channels: {vae_latent_channels}")
+        logger.info(f"  Transformer in_channels: {transformer_in_channels}")
+        
+        if vae_latent_channels != transformer_in_channels:
+            self.latent_projection = torch.nn.Sequential(
+                torch.nn.Conv2d(
+                    vae_latent_channels,
+                    transformer_in_channels,
+                    kernel_size=1,
+                    padding=0,
+                ),
+            )
+            self.latent_projection.to(self.accelerator.device)
+            logger.info(f"  Added projection: {vae_latent_channels} -> {transformer_in_channels} channels")
+        else:
+            self.latent_projection = None
+            logger.info("  No projection needed (channels match)")
+    
     def _setup_lora(self):
         """Setup LoRA on transformer."""
         from peft import LoraConfig, get_peft_model
