@@ -386,12 +386,20 @@ class LoRATrainer:
             control_for_transformer = control_images.squeeze(2)  # (B, C, H, W)
         else:
             control_for_transformer = control_images
-        model_pred = self.transformer(
-            sample=noisy_latents,
+        
+        # Handle different API signatures between model versions
+        transformer_output = self.transformer(
+            latent=noisy_latents,
             timestep=timesteps,
             encoder_hidden_states=encoder_hidden_states,
             image=control_for_transformer,
-        ).sample
+        )
+        
+        # Support both old (.sample) and new API
+        if hasattr(transformer_output, 'sample'):
+            model_pred = transformer_output.sample
+        else:
+            model_pred = transformer_output
         
         # Compute loss (all tensors now in same dtype and shape)
         loss = F.mse_loss(model_pred.float(), noise_for_flow.float(), reduction="mean")
