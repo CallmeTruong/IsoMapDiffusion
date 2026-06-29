@@ -1,18 +1,12 @@
 """
-Training module for LoRA fine-tuning Qwen-Image-Edit on RunPod.
+Training module for LoRA fine-tuning Qwen-Image-Edit.
 
 Usage:
     # Local training
+    python -m training.train --dataset-path ./data/metadata.csv --epochs 5 --lora-rank 16
+
+    # Or with config file
     python -m training.train --config training/configs/default.yaml
-
-    # Deploy and train on RunPod
-    python -m training.runpod_deploy deploy --dataset ./my_dataset
-
-    # Check training status
-    python -m training.runpod_deploy logs <pod_id>
-
-    # Generate synthetic dataset for testing
-    python -m training.prepare_dataset generate --count 100 --output ./data/test
 """
 
 from .config import (
@@ -20,7 +14,6 @@ from .config import (
     DatasetConfig,
     ModelConfig,
     LoRAConfig,
-    RunPodConfig,
     get_preset,
     PRESETS,
 )
@@ -40,7 +33,6 @@ __all__ = [
     "DatasetConfig",
     "ModelConfig",
     "LoRAConfig",
-    "RunPodConfig",
     "get_preset",
     "PRESETS",
     # Dataset
