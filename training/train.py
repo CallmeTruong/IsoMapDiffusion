@@ -355,8 +355,19 @@ class LoRATrainer:
             dtype=torch.long,
         )
         
-        # Add noise to latents
-        noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
+        # Add noise to latents (FlowMatch interpolation)
+        # x_t = (1 - t) * x_0 + t * epsilon, where t is normalized [0, 1]
+        # Handle both 4D (B,C,H,W) and 5D (B,C,F,H,W) latent shapes
+        t_normalized = timesteps.float() / num_train_timesteps
+        if latents.ndim == 5:
+            latents_for_flow = latents.squeeze(2)  # Remove frame dim -> (B, C, H, W)
+            noise_for_flow = noise.squeeze(2)
+            t_normalized = t_normalized.view(-1, 1, 1, 1)  # (B, 1, 1, 1)
+        else:
+            latents_for_flow = latents
+            noise_for_flow = noise
+            t_normalized = t_normalized.view(-1, 1, 1, 1)
+        noisy_latents = (1 - t_normalized) * latents_for_flow + t_normalized * noise_for_flow
         
         # Encode prompts
         encoder_hidden_states = encode_prompt(
@@ -366,16 +377,20 @@ class LoRATrainer:
             self.accelerator.device,
         )
         
-        # Predict noise
+        # Predict noise (transformer expects 4D or 5D depending on model)
+        if noisy_latents.ndim == 5:
+            control_for_transformer = control_images.squeeze(2)  # (B, C, H, W)
+        else:
+            control_for_transformer = control_images
         model_pred = self.transformer(
             sample=noisy_latents,
             timestep=timesteps,
             encoder_hidden_states=encoder_hidden_states,
-            image=control_images,
+            image=control_for_transformer,
         ).sample
         
-        # Compute loss (all tensors now in same dtype)
-        loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
+        # Compute loss (all tensors now in same dtype and shape)
+        loss = F.mse_loss(model_pred.float(), noise_for_flow.float(), reduction="mean")
         
         return loss
     
