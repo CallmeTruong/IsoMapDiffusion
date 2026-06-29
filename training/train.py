@@ -387,27 +387,52 @@ class LoRATrainer:
         else:
             control_for_transformer = control_images
         
+        # Reshape latents for QwenImageTransformer - expects (B, C, H, W) or patched format
+        # Latents from VAE are (B, latent_channels, H, W)
+        latent_shape = noisy_latents.shape  # (B, C, H, W)
+        latent_channels = latent_shape[1]
+        latent_h, latent_w = latent_shape[2], latent_shape[3]
+        
+        # QwenImageEdit model may expect hidden_states in (B, seq_len, C) or (B, H, W, C)
+        # Flatten spatial dims to sequence: (B, H*W, C)
+        hidden_states = noisy_latents.permute(0, 2, 3, 1)  # (B, H, W, C)
+        hidden_states = hidden_states.reshape(hidden_states.shape[0], -1, hidden_states.shape[3])  # (B, H*W, C)
+        
         # Handle different API signatures - try with conditioning_image
         try:
             transformer_output = self.transformer(
-                noisy_latents,
+                hidden_states=hidden_states,
                 timestep=timesteps,
                 encoder_hidden_states=encoder_hidden_states,
                 conditioning_image=control_for_transformer,
             )
         except TypeError:
-            # Fallback: no conditioning image parameter
-            transformer_output = self.transformer(
-                noisy_latents,
-                timestep=timesteps,
-                encoder_hidden_states=encoder_hidden_states,
-            )
+            try:
+                # Try without conditioning_image
+                transformer_output = self.transformer(
+                    hidden_states=hidden_states,
+                    timestep=timesteps,
+                    encoder_hidden_states=encoder_hidden_states,
+                )
+            except TypeError:
+                # Fallback: try positional args with just hidden_states
+                transformer_output = self.transformer(
+                    hidden_states,
+                    encoder_hidden_states,
+                    timestep=timesteps,
+                )
         
         # Support both old (.sample) and new API
         if hasattr(transformer_output, 'sample'):
             model_pred = transformer_output.sample
+        elif hasattr(transformer_output, 'reshaped'):
+            model_pred = transformer_output.reshaped
         else:
             model_pred = transformer_output
+        
+        # Reshape prediction back to (B, C, H, W) for loss computation
+        if model_pred.ndim == 3:  # (B, seq, C)
+            model_pred = model_pred.reshape(model_pred.shape[0], latent_channels, latent_h, latent_w)
         
         # Compute loss (all tensors now in same dtype and shape)
         loss = F.mse_loss(model_pred.float(), noise_for_flow.float(), reduction="mean")
