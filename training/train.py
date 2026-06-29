@@ -315,7 +315,7 @@ class LoRATrainer:
         
         logger.info(f"Total training steps: {self.total_steps}")
         
-    def train_step(self, batch: Dict[str, Any]) -> torch.Tensor:
+    def training_step(self, batch: Dict[str, Any]) -> torch.Tensor:
         """Single training step."""
         config = self.config
         
