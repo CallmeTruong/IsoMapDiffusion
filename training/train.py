@@ -319,10 +319,16 @@ class LoRATrainer:
         """Single training step."""
         config = self.config
         
-        # Get images
+        # Get images (batch, channels, height, width)
         images = batch["image"].to(self.accelerator.device)
         control_images = batch["control_image"].to(self.accelerator.device)
         prompts = batch["prompt"]
+        
+        # Qwen VAE expects 5D tensor: (B, C, F, H, W) - add frame dimension
+        if images.ndim == 4:
+            images = images.unsqueeze(2)  # (B, C, 1, H, W)
+        if control_images.ndim == 4:
+            control_images = control_images.unsqueeze(2)  # (B, C, 1, H, W)
         
         # Convert images to latents
         with torch.no_grad():
