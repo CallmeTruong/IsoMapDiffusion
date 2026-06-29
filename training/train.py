@@ -387,9 +387,9 @@ class LoRATrainer:
         else:
             control_for_transformer = control_images
         
-        # Handle different API signatures between model versions
+        # Handle different API signatures - use positional args
         transformer_output = self.transformer(
-            x=noisy_latents,
+            noisy_latents,
             timestep=timesteps,
             encoder_hidden_states=encoder_hidden_states,
             image=control_for_transformer,
