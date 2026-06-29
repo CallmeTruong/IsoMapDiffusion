@@ -267,6 +267,9 @@ class LoRATrainer:
         
         logger.info(f"Loading dataset from: {config.dataset.metadata_path}")
         
+        # Get transform for converting PIL images to tensors
+        train_transform = get_train_transform(config.dataset.max_pixels)
+        
         # Create dataset
         self.dataset = IsometricDataset(
             base_path=config.dataset.base_path,
@@ -276,6 +279,7 @@ class LoRATrainer:
             prompt_column=config.dataset.prompt_column,
             max_pixels=config.dataset.max_pixels,
             repeat=config.dataset.repeat,
+            transform=train_transform,
         )
         
         # Create dataloader
