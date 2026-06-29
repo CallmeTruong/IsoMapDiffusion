@@ -149,7 +149,7 @@ class TrainingConfig:
     use_gradient_checkpointing: bool = True
     
     # Mixed precision training
-    mixed_precision: Literal["no", "fp16", "bf16"] = "bfloat16"
+    mixed_precision: Literal["no", "fp16", "bf16"] = "bf16"
     
     # Checkpointing
     checkpointing_steps: int = 500

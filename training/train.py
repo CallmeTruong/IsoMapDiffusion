@@ -603,7 +603,7 @@ Examples:
     
     # Model args
     parser.add_argument("--model", type=str, default="Qwen/Qwen-Image-Edit", help="Model ID")
-    parser.add_argument("--dtype", type=str, default="bfloat16", choices=["fp16", "bf16", "fp32"])
+    parser.add_argument("--dtype", type=str, default="bf16", choices=["fp16", "bf16", "fp32"])
     
     # Data args
     parser.add_argument("--dataset-path", type=str, help="Dataset metadata path")
@@ -644,16 +644,24 @@ Examples:
             metadata_path=args.dataset_path or f"{args.base_path}/metadata.csv",
         )
         
+        # Create training config with mixed precision based on dtype
+        from .config import TrainingConfig as TC
+        
+        train_cfg = {
+            "num_epochs": args.epochs,
+            "learning_rate": args.lr,
+            "max_train_steps": args.max_steps,
+            "output_dir": args.output,
+            "seed": args.seed,
+            "validation": args.validation,
+            "mixed_precision": args.dtype if args.dtype != "fp32" else "no",
+        }
+        
         config = TrainingConfig(
             model=model_config,
             lora=lora_config,
             dataset=dataset_config,
-            num_epochs=args.epochs,
-            learning_rate=args.lr,
-            max_train_steps=args.max_steps,
-            output_dir=args.output,
-            seed=args.seed,
-            validation=args.validation,
+            **train_cfg,
         )
     
     # Train
