@@ -230,8 +230,11 @@ class LoRATrainer:
         
     def _setup_latent_projection(self):
         """Setup projection from VAE latent space to transformer expected channels."""
-        vae_latent_channels = self.vae.config.latent_channels  # typically 16
-        transformer_in_channels = self.transformer.config.in_channels  # typically 64
+        vae_config = dict(self.vae.config) if hasattr(self.vae.config, 'keys') else self.vae.config
+        transformer_config = dict(self.transformer.config) if hasattr(self.transformer.config, 'keys') else self.transformer.config
+        
+        vae_latent_channels = vae_config.get('latent_channels', 16)  # typically 16
+        transformer_in_channels = transformer_config.get('in_channels', 64)  # typically 64
         
         logger.info(f"  VAE latent channels: {vae_latent_channels}")
         logger.info(f"  Transformer in_channels: {transformer_in_channels}")
@@ -416,13 +419,21 @@ class LoRATrainer:
         # Reshape latents for QwenImageTransformer - expects (B, C, H, W) or patched format
         # Latents from VAE are (B, latent_channels, H, W)
         latent_shape = noisy_latents.shape  # (B, C, H, W)
-        latent_channels = latent_shape[1]
+        original_latent_channels = latent_shape[1]
         latent_h, latent_w = latent_shape[2], latent_shape[3]
         
-        # QwenImageEdit model may expect hidden_states in (B, seq_len, C) or (B, H, W, C)
-        # Flatten spatial dims to sequence: (B, H*W, C)
-        hidden_states = noisy_latents.permute(0, 2, 3, 1)  # (B, H, W, C)
+        # Apply projection if needed (VAE channels -> transformer channels)
+        if self.latent_projection is not None:
+            projected_latents = self.latent_projection(noisy_latents)
+        else:
+            projected_latents = noisy_latents
+        
+        # Reshape to (B, seq_len, C) for transformer
+        hidden_states = projected_latents.permute(0, 2, 3, 1)  # (B, H, W, C)
         hidden_states = hidden_states.reshape(hidden_states.shape[0], -1, hidden_states.shape[3])  # (B, H*W, C)
+        
+        # Get projected channel count for reshaping output
+        projected_channels = projected_latents.shape[1]
         
         # Handle different API signatures - try with conditioning_image
         try:
@@ -458,7 +469,16 @@ class LoRATrainer:
         
         # Reshape prediction back to (B, C, H, W) for loss computation
         if model_pred.ndim == 3:  # (B, seq, C)
-            model_pred = model_pred.reshape(model_pred.shape[0], latent_channels, latent_h, latent_w)
+            model_pred = model_pred.reshape(model_pred.shape[0], projected_channels, latent_h, latent_w)
+        
+        # Project back to original latent channels if needed
+        if self.latent_projection is not None:
+            # Transpose to (B, C, H, W) for conv transpose
+            model_pred = model_pred.permute(0, 2, 3, 1)  # (B, H, W, C)
+            # Project back using transpose conv or just slice
+            # Simple approach: just take first C channels
+            model_pred = model_pred[..., :original_latent_channels]
+            model_pred = model_pred.permute(0, 3, 1, 2)  # Back to (B, C, H, W)
         
         # Compute loss (all tensors now in same dtype and shape)
         loss = F.mse_loss(model_pred.float(), noise_for_flow.float(), reduction="mean")
