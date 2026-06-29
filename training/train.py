@@ -205,17 +205,19 @@ class LoRATrainer:
             torch_dtype=dtype,
         )
         
-        # Get components before CPU offload
+        # Move to accelerator device
+        self.pipeline = self.pipeline.to(self.accelerator.device)
+        
+        # Get components
         self.vae = self.pipeline.vae
         self.text_encoder = self.pipeline.text_encoder
         self.transformer = self.pipeline.transformer
         self.scheduler = self.pipeline.scheduler
         
-        # CPU offload for non-trainable models (they're frozen anyway)
-        self.vae.enable_cpu_offload()
-        self.text_encoder.enable_cpu_offload()
-        
-        # Keep transformer on GPU (needed for LoRA training)
+        # Freeze non-LoRA params
+        self.vae.requires_grad_(False)
+        self.text_encoder.requires_grad_(False)
+        self.transformer.requires_grad_(False)
         
         logger.info(f"  Model loaded to {self.accelerator.device}")
         
@@ -240,9 +242,6 @@ class LoRATrainer:
         # Apply LoRA to transformer
         self.transformer = get_peft_model(self.transformer, peft_config)
         self.transformer.print_trainable_parameters()
-        
-        # Move LoRA model to GPU for training
-        self.transformer = self.transformer.to(self.accelerator.device)
         
         logger.info("LoRA setup complete!")
         
