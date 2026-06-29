@@ -387,13 +387,21 @@ class LoRATrainer:
         else:
             control_for_transformer = control_images
         
-        # Handle different API signatures - use positional args
-        transformer_output = self.transformer(
-            noisy_latents,
-            timestep=timesteps,
-            encoder_hidden_states=encoder_hidden_states,
-            image=control_for_transformer,
-        )
+        # Handle different API signatures - try with conditioning_image
+        try:
+            transformer_output = self.transformer(
+                noisy_latents,
+                timestep=timesteps,
+                encoder_hidden_states=encoder_hidden_states,
+                conditioning_image=control_for_transformer,
+            )
+        except TypeError:
+            # Fallback: no conditioning image parameter
+            transformer_output = self.transformer(
+                noisy_latents,
+                timestep=timesteps,
+                encoder_hidden_states=encoder_hidden_states,
+            )
         
         # Support both old (.sample) and new API
         if hasattr(transformer_output, 'sample'):
