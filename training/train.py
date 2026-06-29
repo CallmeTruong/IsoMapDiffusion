@@ -389,7 +389,7 @@ class LoRATrainer:
         
         # Handle different API signatures between model versions
         transformer_output = self.transformer(
-            latent=noisy_latents,
+            x=noisy_latents,
             timestep=timesteps,
             encoder_hidden_states=encoder_hidden_states,
             image=control_for_transformer,
