@@ -324,6 +324,13 @@ class LoRATrainer:
         control_images = batch["control_image"].to(self.accelerator.device)
         prompts = batch["prompt"]
         
+        # Get dtype from VAE
+        vae_dtype = next(self.vae.parameters()).dtype
+        
+        # Convert to VAE's dtype (bfloat16 for Qwen)
+        images = images.to(vae_dtype)
+        control_images = control_images.to(vae_dtype)
+        
         # Qwen VAE expects 5D tensor: (B, C, F, H, W) - add frame dimension
         if images.ndim == 4:
             images = images.unsqueeze(2)  # (B, C, 1, H, W)
@@ -335,7 +342,7 @@ class LoRATrainer:
             latents = self.vae.encode(images).latent_dist.sample()
             latents = latents * self.vae.config.scaling_factor
         
-        # Sample noise
+        # Sample noise in same dtype as latents
         noise = torch.randn_like(latents)
         
         # Sample timesteps
@@ -366,7 +373,7 @@ class LoRATrainer:
             image=control_images,
         ).sample
         
-        # Compute loss
+        # Compute loss (all tensors now in same dtype)
         loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
         
         return loss
