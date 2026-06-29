@@ -340,15 +340,16 @@ class LoRATrainer:
         # Convert images to latents
         with torch.no_grad():
             latents = self.vae.encode(images).latent_dist.sample()
-            latents = latents * self.vae.config.scaling_factor
+            latents = latents * 0.18215  # Standard VAE scaling factor
         
         # Sample noise in same dtype as latents
         noise = torch.randn_like(latents)
         
-        # Sample timesteps
+        # Sample timesteps (DDPM schedulers typically use 1000 steps)
+        num_train_timesteps = 1000
         timesteps = torch.randint(
             0,
-            self.scheduler.config.num_train_timesteps,
+            num_train_timesteps,
             (latents.shape[0],),
             device=latents.device,
             dtype=torch.long,
