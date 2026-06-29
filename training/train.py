@@ -214,6 +214,10 @@ class LoRATrainer:
         self.transformer = self.pipeline.transformer
         self.scheduler = self.pipeline.scheduler
         
+        # Enable gradient checkpointing to save memory
+        if hasattr(self.transformer, 'gradient_checkpointing_enable'):
+            self.transformer.gradient_checkpointing_enable()
+        
         # Freeze non-LoRA params
         self.vae.requires_grad_(False)
         self.text_encoder.requires_grad_(False)
