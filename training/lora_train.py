@@ -448,15 +448,20 @@ def main():
                 sigmas = get_sigmas(timesteps, n_dim=pixel_latents.ndim, dtype=pixel_latents.dtype)
                 noisy_model_input = (1.0 - sigmas) * pixel_latents + sigmas * noise
 
+                # Squeeze T dimension for pack_latents: [B, 1, C, H, W] -> [B, C, H, W]
+                pixel_latents_4d = pixel_latents.squeeze(1)
+                control_img_4d = control_img.squeeze(1)
+
                 packed_noisy_model_input = QwenImageEditPipeline._pack_latents(
-                    noisy_model_input, bsz, noisy_model_input.shape[2], noisy_model_input.shape[3], noisy_model_input.shape[4]
+                    pixel_latents_4d, bsz, pixel_latents_4d.shape[1], pixel_latents_4d.shape[2], pixel_latents_4d.shape[3]
                 )
                 packed_control_img = QwenImageEditPipeline._pack_latents(
-                    control_img, bsz, control_img.shape[2], control_img.shape[3], control_img.shape[4]
+                    control_img_4d, bsz, control_img_4d.shape[1], control_img_4d.shape[2], control_img_4d.shape[3]
                 )
 
+                # img_shapes for transformer: use original 5D shapes
                 img_shapes = [[
-                    (1, noisy_model_input.shape[3] // 2, noisy_model_input.shape[4] // 2),
+                    (1, pixel_latents.shape[3] // 2, pixel_latents.shape[4] // 2),
                     (1, control_img.shape[3] // 2, control_img.shape[4] // 2)
                 ]] * bsz
                 
@@ -484,18 +489,19 @@ def main():
                 )[0]
 
                 model_pred = model_pred[:, : packed_noisy_model_input.size(1)]
-                model_pred = QwenImageEditPipeline._unpack_latents(
-                    model_pred,
-                    height=noisy_model_input.shape[3] * vae_scale_factor,
-                    width=noisy_model_input.shape[4] * vae_scale_factor,
-                    vae_scale_factor=vae_scale_factor,
-                )
 
                 weighting = compute_loss_weighting_for_sd3(weighting_scheme="none", sigmas=sigmas)
                 target = noise - pixel_latents
-                target = target.permute(0, 2, 1, 3, 4)
+
+                # Pack target to same space as model_pred for loss computation
+                # target: [B, T, C, H, W] -> [B, C, H, W]
+                target_for_loss = target.squeeze(1)
+                target_packed = QwenImageEditPipeline._pack_latents(
+                    target_for_loss, bsz, target_for_loss.shape[1], target_for_loss.shape[2], target_for_loss.shape[3]
+                )
+
                 loss = torch.mean(
-                    (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
+                    (weighting.float() * (model_pred.float() - target_packed.float()) ** 2).reshape(bsz, -1),
                     1,
                 )
                 loss = loss.mean()
