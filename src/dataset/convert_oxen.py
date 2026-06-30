@@ -14,16 +14,13 @@ import json
 import csv
 from pathlib import Path
 
+from ..constants import DEFAULT_PROMPT
+
 
 def convert_to_oxen_format(
     dataset_dir: str = None,
     output_csv: str = "oxen_dataset.csv",
-    prompt: str = (
-        "Fill in the outlined section with coherent pixels matching the <isometric pixel art> style, "
-        "seamlessly blending edges with surrounding areas, maintaining consistent isometric perspective, "
-        "shadow direction, lighting, pixel density, and color harmony while preserving structural integrity "
-        "and removing all border artifacts"
-    ),
+    prompt: str = DEFAULT_PROMPT,
 ):
     """
     Convert existing dataset to Oxen format.
@@ -80,9 +77,7 @@ def main():
     parser = argparse.ArgumentParser(description="Convert dataset to Oxen format")
     parser.add_argument("--dataset", type=str, help="Dataset directory")
     parser.add_argument("--output", type=str, default="oxen_dataset.csv", help="Output CSV")
-    parser.add_argument("--prompt", type=str,
-                        default="Fill in the outlined section with coherent pixels matching the <isometric pixel art> style, seamlessly blending edges with surrounding areas, maintaining consistent isometric perspective, shadow direction, lighting, pixel density, and color harmony while preserving structural integrity and removing all border artifacts",
-                        help="Training prompt")
+    parser.add_argument("--prompt", type=str, default=DEFAULT_PROMPT, help="Training prompt")
 
     args = parser.parse_args()
 

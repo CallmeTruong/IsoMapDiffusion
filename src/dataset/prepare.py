@@ -12,6 +12,7 @@ from PIL import Image
 from .omni import (
     OmniMasker, TEMPLATE_SIZE, QUADRANT_SIZE, DISTRIBUTION, ALL_TYPES, TYPE_FULL,
 )
+from ..constants import DEFAULT_PROMPT
 
 
 @dataclass
@@ -64,14 +65,11 @@ class DatasetPreparator:
         selected = []
         remaining = list(ALL_TYPES)
         
-        # Always include TYPE_FULL (full generation is important)
         if TYPE_FULL in remaining and num_variants > 1:
             selected.append(TYPE_FULL)
             remaining.remove(TYPE_FULL)
         
-        # Fill remaining slots randomly
         while len(selected) < num_variants and remaining:
-            # Weight by distribution category
             weights = []
             for t in remaining:
                 cat = t.split('_')[0] if '_' in t else t
@@ -80,7 +78,6 @@ class DatasetPreparator:
                 else:
                     weights.append(0.1)
             
-            # Normalize weights
             total = sum(weights)
             if total > 0:
                 weights = [w / total for w in weights]
@@ -91,7 +88,6 @@ class DatasetPreparator:
             selected.append(chosen)
             remaining.remove(chosen)
         
-        # Shuffle to mix types
         random.shuffle(selected)
         return selected
 
@@ -122,10 +118,10 @@ class DatasetPreparator:
     def process_pair(self, render_path: Path, pixel_art_path: Path, output_prefix: str,
                      resize_to: Tuple[int, int] = (TEMPLATE_SIZE, TEMPLATE_SIZE),
                      num_variants: int = 5, template_types: List[str] = None,
-                     apply_corruption: bool = True, corruption_params: dict = None) -> List[TrainingSample]:
+                     apply_corruption: bool = True, corruption_params: dict = None,
+                     prompt: str = DEFAULT_PROMPT) -> List[TrainingSample]:
         samples = []
         try:
-            # Clean old templates for this tile
             if self.clean:
                 self._cleanup_tile(output_prefix)
 
@@ -134,7 +130,6 @@ class DatasetPreparator:
             target_path = self.targets_dir / f"{output_prefix}_target.png"
             pixel_art.save(target_path)
 
-            # Select diverse types for this tile (or use provided types)
             if template_types is None:
                 template_types = self._select_diverse_types(num_variants)
 
@@ -143,10 +138,15 @@ class DatasetPreparator:
                 template = self.omni.create_infill_template(pixel_art, render, region)
                 template_path = self.templates_dir / f"{output_prefix}_{template_type}_{variant_index:02d}_template.png"
                 template.save(template_path)
+                
+                # Store relative paths for GPU compatibility
+                rel_template_path = f"templates/{template_path.name}"
+                rel_target_path = f"targets/{target_path.name}"
+                
                 samples.append(TrainingSample(
                     sample_id=f"{output_prefix}_{template_type}_{variant_index}",
-                    template_path=str(template_path),
-                    target_path=str(target_path),
+                    template_path=rel_template_path,
+                    target_path=rel_target_path,
                     mask_type=template_type,
                     metadata={
                         'variant_index': variant_index,
@@ -158,17 +158,17 @@ class DatasetPreparator:
             print(f"Error processing {output_prefix}: {e}")
         return samples
 
-    def prepare_dataset(self, resize_to: Tuple[int, int] = (TEMPLATE_SIZE, TEMPLATE_SIZE),
-                       variants_per_pair: int = 5, max_pairs: Optional[int] = None,
-                       progress_callback: Optional[Callable[[int, int], None]] = None,
-                       apply_corruption: bool = True, corruption_params: dict = None) -> dict:
+    def prepare(self, resize_to: Tuple[int, int] = (TEMPLATE_SIZE, TEMPLATE_SIZE),
+                variants_per_pair: int = 5, max_pairs: Optional[int] = None,
+                progress_callback: Optional[Callable[[int, int], None]] = None,
+                apply_corruption: bool = True, corruption_params: dict = None,
+                prompt: str = DEFAULT_PROMPT) -> dict:
         pairs = self.prepare_pairs(target_size=resize_to[0])
         if max_pairs:
             pairs = pairs[:max_pairs]
 
         print(f"Processing {len(pairs)} pairs with {variants_per_pair} variants each")
         print(f"Expected samples: {len(pairs) * variants_per_pair}")
-        print(f"Perfect Corruption: {'Enabled' if apply_corruption else 'Disabled'}")
 
         all_samples = []
         mask_type_counts: Dict[str, int] = {}
@@ -180,6 +180,7 @@ class DatasetPreparator:
                 render_path, pixel_art_path, output_prefix,
                 resize_to=resize_to, num_variants=variants_per_pair,
                 apply_corruption=apply_corruption, corruption_params=corruption_params,
+                prompt=prompt,
             )
             for sample in samples:
                 all_samples.append(sample)
@@ -192,7 +193,6 @@ class DatasetPreparator:
             'total_pairs': len(pairs),
             'variants_per_pair': variants_per_pair,
             'resize_to': resize_to,
-            'apply_corruption': apply_corruption,
             'mask_type_counts': mask_type_counts,
             'samples': [
                 {'sample_id': s.sample_id, 'template_path': s.template_path,
@@ -204,11 +204,3 @@ class DatasetPreparator:
         with open(meta_path, 'w') as f:
             json.dump(dataset_meta, f, indent=2)
         return dataset_meta
-
-    def prepare_qwen(self, resize_to: Tuple[int, int] = (TEMPLATE_SIZE, TEMPLATE_SIZE),
-                    variants_per_pair: int = 5, max_pairs: Optional[int] = None,
-                    apply_corruption: bool = True, corruption_params: dict = None) -> dict:
-        return self.prepare_dataset(
-            resize_to=resize_to, variants_per_pair=variants_per_pair,
-            max_pairs=max_pairs, apply_corruption=apply_corruption, corruption_params=corruption_params,
-        )
