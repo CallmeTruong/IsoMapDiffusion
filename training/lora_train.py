@@ -163,8 +163,13 @@ def main():
                 txt_path = os.path.join(args.data_config.img_dir, img_name_key + '.txt')
 
                 img = Image.open(img_path).convert('RGB')
-                calculated_width, calculated_height, _ = calculate_dimensions(1024 * 1024, img.size[0] / img.size[1])
-                prompt_image = text_encoding_pipeline.image_processor.resize(img, calculated_height, calculated_width)
+                # Match dataset: crop to square, then resize
+                w, h = img.size
+                min_dim = min(w, h)
+                left = (w - min_dim) // 2
+                top = (h - min_dim) // 2
+                img = img.crop((left, top, left + min_dim, top + min_dim))
+                prompt_image = img.resize((args.data_config.img_size, args.data_config.img_size), Image.Resampling.LANCZOS)
                 
                 prompt = open(txt_path, encoding='utf-8').read() if os.path.exists(txt_path) else ""
                 prompt_embeds, prompt_embeds_mask = text_encoding_pipeline.encode_prompt(
@@ -216,17 +221,29 @@ def main():
     )
     vae.to(accelerator.device, dtype=weight_dtype)
 
+    # Clear old cache if it exists (might have wrong dimensions)
+    old_cache_dir = os.path.join(args.output_dir, "cache")
+    if os.path.exists(old_cache_dir):
+        import shutil
+        shutil.rmtree(old_cache_dir)
+        print(f"Cleared old cache at {old_cache_dir}")
+
     cached_image_embeddings = None
     cached_image_embeddings_control = None
     
     if args.precompute_image_embeddings:
         with torch.no_grad():
-            # Target images
+            # Target images - resize to match dataset logic
             cached_image_embeddings = {}
             for img_name in tqdm([i for i in os.listdir(args.data_config.img_dir) if i.endswith(('.png', '.jpg'))]):
                 img = Image.open(os.path.join(args.data_config.img_dir, img_name)).convert('RGB')
-                calculated_width, calculated_height, _ = calculate_dimensions(1024 * 1024, img.size[0] / img.size[1])
-                img = text_encoding_pipeline.image_processor.resize(img, calculated_height, calculated_width)
+                # Match dataset: crop to square, then resize
+                w, h = img.size
+                min_dim = min(w, h)
+                left = (w - min_dim) // 2
+                top = (h - min_dim) // 2
+                img = img.crop((left, top, left + min_dim, top + min_dim))
+                img = img.resize((args.data_config.img_size, args.data_config.img_size), Image.Resampling.LANCZOS)
 
                 img_arr = torch.from_numpy((np.array(img) / 127.5) - 1)
                 img_arr = img_arr.permute(2, 0, 1).unsqueeze(0)
@@ -240,8 +257,13 @@ def main():
             cached_image_embeddings_control = {}
             for img_name in tqdm([i for i in os.listdir(args.data_config.control_dir) if i.endswith(('.png', '.jpg'))]):
                 img = Image.open(os.path.join(args.data_config.control_dir, img_name)).convert('RGB')
-                calculated_width, calculated_height, _ = calculate_dimensions(1024 * 1024, img.size[0] / img.size[1])
-                img = text_encoding_pipeline.image_processor.resize(img, calculated_height, calculated_width)
+                # Match dataset: crop to square, then resize
+                w, h = img.size
+                min_dim = min(w, h)
+                left = (w - min_dim) // 2
+                top = (h - min_dim) // 2
+                img = img.crop((left, top, left + min_dim, top + min_dim))
+                img = img.resize((args.data_config.img_size, args.data_config.img_size), Image.Resampling.LANCZOS)
 
                 img_arr = torch.from_numpy((np.array(img) / 127.5) - 1)
                 img_arr = img_arr.permute(2, 0, 1).unsqueeze(0)
