@@ -39,6 +39,7 @@ class CustomImageDataset(Dataset):
         cached_image_embeddings=None,
         control_dir=None,
         cached_image_embeddings_control=None,
+        txt_cache_dir=None,
     ):
         self.img_dir = Path(img_dir) if img_dir else None
         self.control_dir = Path(control_dir) if control_dir else None
@@ -49,6 +50,7 @@ class CustomImageDataset(Dataset):
         self.cached_text_embeddings = cached_text_embeddings
         self.cached_image_embeddings = cached_image_embeddings
         self.cached_control_embeddings = cached_image_embeddings_control
+        self.txt_cache_dir = txt_cache_dir
 
         # Build sample list from control images
         self.samples = []
@@ -139,7 +141,7 @@ class CustomImageDataset(Dataset):
             # Load caption/prompt
             # Use control filename as cache key (matches precompute iteration)
             img_name_for_cache = ctrl_path.split('/')[-1].rsplit('.', 1)[0] + '.txt'
-            empty_key = img_name_for_cache + 'empty_embedding'
+            empty_key = img_name_for_cache + '_empty.pt'
 
             if self.cached_text_embeddings is not None:
                 if empty_key in self.cached_text_embeddings and \
@@ -152,6 +154,20 @@ class CustomImageDataset(Dataset):
                     return target_img, emb['prompt_embeds'], emb['prompt_embeds_mask'], control_img
 
                 # Fallback: empty
+                return target_img, torch.zeros(1, 768), torch.zeros(1, dtype=torch.int32), control_img
+            elif hasattr(self, 'txt_cache_dir') and self.txt_cache_dir:
+                # Load from disk cache
+                import os
+                cache_path = os.path.join(self.txt_cache_dir, empty_key)
+                if os.path.exists(cache_path) and np.random.random() < self.caption_dropout_rate:
+                    emb = torch.load(cache_path, map_location='cpu')
+                    return target_img, emb['prompt_embeds'], emb['prompt_embeds_mask'], control_img
+                
+                cache_path = os.path.join(self.txt_cache_dir, img_name_for_cache + '.pt')
+                if os.path.exists(cache_path):
+                    emb = torch.load(cache_path, map_location='cpu')
+                    return target_img, emb['prompt_embeds'], emb['prompt_embeds_mask'], control_img
+                
                 return target_img, torch.zeros(1, 768), torch.zeros(1, dtype=torch.int32), control_img
             else:
                 try:
@@ -175,6 +191,7 @@ def loader(
     train_batch_size=1,
     num_workers=4,
     img_size=1024,
+    txt_cache_dir=None,
     **kwargs,
 ):
     """Create DataLoader from control/target image pairs."""
@@ -188,6 +205,7 @@ def loader(
         cached_image_embeddings=cached_image_embeddings,
         control_dir=control_dir,
         cached_image_embeddings_control=cached_image_embeddings_control,
+        txt_cache_dir=txt_cache_dir,
     )
 
     return DataLoader(

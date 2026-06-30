@@ -181,6 +181,10 @@ def main():
                         'prompt_embeds': prompt_embeds[0].to('cpu'),
                         'prompt_embeds_mask': pem_mask
                     }, os.path.join(txt_cache_dir, img_name_key + '.txt' + '.pt'))
+                    torch.save({
+                        'prompt_embeds': prompt_embeds[0].to('cpu'),
+                        'prompt_embeds_mask': pem_mask
+                    }, os.path.join(txt_cache_dir, img_name_key + '.txt' + '_empty.pt'))
                 else:
                     cached_text_embeddings[img_name_key + '.txt'] = {
                         'prompt_embeds': prompt_embeds[0].to('cpu'),
@@ -195,10 +199,16 @@ def main():
                     max_sequence_length=1024,
                 )
                 pem_mask_empty = prompt_embeds_mask_empty[0].to('cpu') if prompt_embeds_mask_empty is not None else None
-                cached_text_embeddings[img_name_key + '.txt' + 'empty_embedding'] = {
-                    'prompt_embeds': prompt_embeds_empty[0].to('cpu'),
-                    'prompt_embeds_mask': pem_mask_empty
-                }
+                if args.save_cache_on_disk:
+                    torch.save({
+                        'prompt_embeds': prompt_embeds_empty[0].to('cpu'),
+                        'prompt_embeds_mask': pem_mask_empty
+                    }, os.path.join(txt_cache_dir, img_name_key + '.txt' + '_empty.pt'))
+                else:
+                    cached_text_embeddings[img_name_key + '.txt' + 'empty_embedding'] = {
+                        'prompt_embeds': prompt_embeds_empty[0].to('cpu'),
+                        'prompt_embeds_mask': pem_mask_empty
+                    }
 
     vae = AutoencoderKLQwenImage.from_pretrained(
         args.pretrained_model_name_or_path,
@@ -331,6 +341,7 @@ def main():
         cached_text_embeddings=cached_text_embeddings,
         cached_image_embeddings=cached_image_embeddings,
         cached_image_embeddings_control=cached_image_embeddings_control,
+        txt_cache_dir=txt_cache_dir if args.save_cache_on_disk else None,
         **args.data_config
     )
 
