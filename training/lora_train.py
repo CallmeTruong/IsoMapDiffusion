@@ -169,6 +169,12 @@ def main():
                     img_name_key = img_name_key[:-9]
                 txt_path = os.path.join(args.data_config.img_dir, img_name_key + '.txt')
                 
+                # Skip if already cached on disk
+                if args.save_cache_on_disk:
+                    cache_file = os.path.join(txt_cache_dir, img_name_key + '.txt.pt')
+                    if os.path.exists(cache_file):
+                        continue
+                
                 img = Image.open(img_path).convert('RGB')
                 w, h = img.size
                 min_dim = min(w, h)
@@ -230,6 +236,9 @@ def main():
     cached_image_embeddings = None
     cached_image_embeddings_control = None
     
+    # Image embeddings cache directory
+    img_cache_dir = os.path.join(cache_dir, "image_latents") if args.save_cache_on_disk else None
+    
     if args.precompute_image_embeddings:
         with torch.no_grad():
             batch_size = 8  # Process multiple images at once for faster VAE encoding
@@ -237,13 +246,22 @@ def main():
             # === Target images ===
             cached_image_embeddings = {}
             target_files = [f for f in os.listdir(args.data_config.img_dir) if f.endswith(('.png', '.jpg'))]
+            cached_count = 0
             
             for batch_start in tqdm(range(0, len(target_files), batch_size), desc="Encoding target latents"):
                 batch_end = min(batch_start + batch_size, len(target_files))
                 batch_imgs = []
                 batch_names = []
+                batch_to_encode = []  # Only images that need encoding
                 
                 for img_name in target_files[batch_start:batch_end]:
+                    if args.save_cache_on_disk:
+                        cache_file = os.path.join(img_cache_dir, "target", img_name + '.pt')
+                        if os.path.exists(cache_file):
+                            cached_image_embeddings[img_name] = torch.load(cache_file)
+                            cached_count += 1
+                            continue
+                    
                     img = Image.open(os.path.join(args.data_config.img_dir, img_name)).convert('RGB')
                     w, h = img.size
                     min_dim = min(w, h)
@@ -252,24 +270,26 @@ def main():
                     batch_imgs.append(img)
                     batch_names.append(img_name)
                 
-                # Stack images into batch
-                batch_arr = np.stack([(np.array(img) / 127.5) - 1 for img in batch_imgs])  # [B, H, W, C]
-                batch_tensor = torch.from_numpy(batch_arr).permute(0, 3, 1, 2)  # [B, C, H, W]
-                batch_tensor = batch_tensor.unsqueeze(2)  # [B, C, 1, H, W]
-                pixel_values = batch_tensor.to(dtype=weight_dtype).to(accelerator.device)
-                
-                # Encode batch
-                latents_dist = vae.encode(pixel_values).latent_dist
-                # Sample and store individually
-                for i, name in enumerate(batch_names):
-                    sampled = latents_dist.sample()[i].to('cpu')  # [C, H, W]
-                    cached_image_embeddings[name] = sampled
+                if len(batch_imgs) > 0:
+                    os.makedirs(os.path.join(img_cache_dir, "target"), exist_ok=True)
+                    batch_arr = np.stack([(np.array(img) / 127.5) - 1 for img in batch_imgs])
+                    batch_tensor = torch.from_numpy(batch_arr).permute(0, 3, 1, 2)
+                    batch_tensor = batch_tensor.unsqueeze(2)
+                    pixel_values = batch_tensor.to(dtype=weight_dtype).to(accelerator.device)
+                    
+                    latents_dist = vae.encode(pixel_values).latent_dist
+                    for i, name in enumerate(batch_names):
+                        sampled = latents_dist.sample()[i].to('cpu')
+                        cached_image_embeddings[name] = sampled
+                        if args.save_cache_on_disk:
+                            torch.save(sampled, os.path.join(img_cache_dir, "target", name + '.pt'))
             
-            print(f"[DEBUG] Cached target latents shape: {list(cached_image_embeddings.values())[0].shape}")
+            print(f"[DEBUG] Cached target latents: {len(cached_image_embeddings)} total, {cached_count} from disk")
             
             # === Control images ===
             cached_image_embeddings_control = {}
             control_files = [f for f in os.listdir(args.data_config.control_dir) if f.endswith(('.png', '.jpg'))]
+            cached_count_ctrl = 0
             
             for batch_start in tqdm(range(0, len(control_files), batch_size), desc="Encoding control latents"):
                 batch_end = min(batch_start + batch_size, len(control_files))
@@ -277,6 +297,13 @@ def main():
                 batch_names = []
                 
                 for img_name in control_files[batch_start:batch_end]:
+                    if args.save_cache_on_disk:
+                        cache_file = os.path.join(img_cache_dir, "control", img_name + '.pt')
+                        if os.path.exists(cache_file):
+                            cached_image_embeddings_control[img_name] = torch.load(cache_file)
+                            cached_count_ctrl += 1
+                            continue
+                    
                     img = Image.open(os.path.join(args.data_config.control_dir, img_name)).convert('RGB')
                     w, h = img.size
                     min_dim = min(w, h)
@@ -285,17 +312,21 @@ def main():
                     batch_imgs.append(img)
                     batch_names.append(img_name)
                 
-                batch_arr = np.stack([(np.array(img) / 127.5) - 1 for img in batch_imgs])
-                batch_tensor = torch.from_numpy(batch_arr).permute(0, 3, 1, 2)
-                batch_tensor = batch_tensor.unsqueeze(2)
-                pixel_values = batch_tensor.to(dtype=weight_dtype).to(accelerator.device)
-                
-                latents_dist = vae.encode(pixel_values).latent_dist
-                for i, name in enumerate(batch_names):
-                    sampled = latents_dist.sample()[i].to('cpu')
-                    cached_image_embeddings_control[name] = sampled
+                if len(batch_imgs) > 0:
+                    os.makedirs(os.path.join(img_cache_dir, "control"), exist_ok=True)
+                    batch_arr = np.stack([(np.array(img) / 127.5) - 1 for img in batch_imgs])
+                    batch_tensor = torch.from_numpy(batch_arr).permute(0, 3, 1, 2)
+                    batch_tensor = batch_tensor.unsqueeze(2)
+                    pixel_values = batch_tensor.to(dtype=weight_dtype).to(accelerator.device)
+                    
+                    latents_dist = vae.encode(pixel_values).latent_dist
+                    for i, name in enumerate(batch_names):
+                        sampled = latents_dist.sample()[i].to('cpu')
+                        cached_image_embeddings_control[name] = sampled
+                        if args.save_cache_on_disk:
+                            torch.save(sampled, os.path.join(img_cache_dir, "control", name + '.pt'))
             
-            print(f"[DEBUG] Cached control latents shape: {list(cached_image_embeddings_control.values())[0].shape}")
+            print(f"[DEBUG] Cached control latents: {len(cached_image_embeddings_control)} total, {cached_count_ctrl} from disk")
 
         vae.to('cpu')
         torch.cuda.empty_cache()
