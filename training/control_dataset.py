@@ -124,7 +124,7 @@ class CustomImageDataset(Dataset):
             if self.cached_image_embeddings is not None:
                 target_img = self.cached_image_embeddings.get(
                     img_path.split('/')[-1],
-                    torch.zeros(1, 16, 64, 64)
+                    torch.zeros(16, 128, 128)  # [C, H, W]
                 )
             else:
                 target_img = self._load_image(img_path)
@@ -133,7 +133,7 @@ class CustomImageDataset(Dataset):
             if self.cached_control_embeddings is not None:
                 control_img = self.cached_control_embeddings.get(
                     ctrl_path.split('/')[-1],
-                    torch.zeros(1, 16, 64, 64)
+                    torch.zeros(16, 128, 128)  # [C, H, W]
                 )
             else:
                 control_img = self._load_image(ctrl_path)
@@ -208,9 +208,25 @@ def loader(
         txt_cache_dir=txt_cache_dir,
     )
 
+    def collate_fn(batch):
+        """Add batch dimension to latents. Returns 4D tensors [B, C, H, W]."""
+        target_img, prompt_embeds, prompt_embeds_mask, control_img = zip(*batch)
+        
+        # Add batch dim: [C, H, W] -> [1, C, H, W] -> stack -> [B, C, H, W]
+        target_img = [t.unsqueeze(0) if t.dim() == 3 else t for t in target_img]
+        control_img = [c.unsqueeze(0) if c.dim() == 3 else c for c in control_img]
+        
+        return (
+            torch.stack(target_img),  # [B, C, H, W]
+            torch.stack(prompt_embeds),  # [B, ...]
+            torch.stack(prompt_embeds_mask),  # [B, ...]
+            torch.stack(control_img),  # [B, C, H, W]
+        )
+
     return DataLoader(
         dataset,
         batch_size=train_batch_size,
         num_workers=num_workers,
         shuffle=True if cached_text_embeddings is None else True,
+        collate_fn=collate_fn if cached_image_embeddings is not None else None,
     )

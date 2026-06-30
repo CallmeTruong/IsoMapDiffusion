@@ -279,12 +279,14 @@ def main():
                     
                     latents_dist = vae.encode(pixel_values).latent_dist
                     for i, name in enumerate(batch_names):
-                        sampled = latents_dist.sample()[i].to('cpu')
+                        sampled = latents_dist.sample()[i].to('cpu')  # [C, T, H, W]
+                        sampled = sampled.squeeze(1)  # Remove T dim -> [C, H, W]
                         cached_image_embeddings[name] = sampled
                         if args.save_cache_on_disk:
                             torch.save(sampled, os.path.join(img_cache_dir, "target", name + '.pt'))
             
-            print(f"[DEBUG] Cached target latents: {len(cached_image_embeddings)} total, {cached_count} from disk")
+            if cached_image_embeddings:
+                print(f"[DEBUG] Cached target latents: {len(cached_image_embeddings)} total, {cached_count} from disk, shape: {list(cached_image_embeddings.values())[0].shape}")
             
             # === Control images ===
             cached_image_embeddings_control = {}
@@ -321,12 +323,14 @@ def main():
                     
                     latents_dist = vae.encode(pixel_values).latent_dist
                     for i, name in enumerate(batch_names):
-                        sampled = latents_dist.sample()[i].to('cpu')
+                        sampled = latents_dist.sample()[i].to('cpu')  # [C, T, H, W]
+                        sampled = sampled.squeeze(1)  # Remove T dim -> [C, H, W]
                         cached_image_embeddings_control[name] = sampled
                         if args.save_cache_on_disk:
                             torch.save(sampled, os.path.join(img_cache_dir, "control", name + '.pt'))
             
-            print(f"[DEBUG] Cached control latents: {len(cached_image_embeddings_control)} total, {cached_count_ctrl} from disk")
+            if cached_image_embeddings_control:
+                print(f"[DEBUG] Cached control latents: {len(cached_image_embeddings_control)} total, {cached_count_ctrl} from disk, shape: {list(cached_image_embeddings_control.values())[0].shape}")
 
         vae.to('cpu')
         torch.cuda.empty_cache()
