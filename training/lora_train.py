@@ -19,7 +19,7 @@ from diffusers.optimization import get_scheduler
 from diffusers.training_utils import compute_density_for_timestep_sampling, compute_loss_weighting_for_sd3
 from diffusers.utils import convert_state_dict_to_diffusers
 from diffusers.utils.torch_utils import is_compiled_module
-from .control_dataset import loader, image_resize
+from image_datasets.control_dataset import loader, image_resize
 from omegaconf import OmegaConf
 from peft import LoraConfig
 from peft.utils import get_peft_model_state_dict
