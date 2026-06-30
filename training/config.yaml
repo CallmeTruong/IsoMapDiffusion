@@ -52,7 +52,7 @@ tracker_project_name: isometric-lora
 # Caching - precompute embeddings for faster training
 precompute_text_embeddings: true
 precompute_image_embeddings: true
-save_cache_on_disk: false
+save_cache_on_disk: true
 
 # Quantization (optional, for lower memory)
 quantize: false
