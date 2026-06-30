@@ -28,8 +28,21 @@ from tqdm.auto import tqdm
 import transformers
 import datasets
 import diffusers
-import bitsandbytes as bnb
-from optimum.quanto import quantize, qfloat8, freeze
+
+# Optional imports - only needed if quantize=True
+try:
+    import bitsandbytes as bnb
+    HAS_BNB = True
+except ImportError:
+    HAS_BNB = False
+    bnb = None
+
+try:
+    from optimum.quanto import quantize, qfloat8, freeze
+    HAS_QUANTO = True
+except ImportError:
+    HAS_QUANTO = False
+    quantize, qfloat8, freeze = None, None, None
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -143,8 +156,11 @@ def main():
                 
             for img_name in tqdm([i for i in os.listdir(args.data_config.control_dir) if i.endswith(('.png', '.jpg'))]):
                 img_path = os.path.join(args.data_config.control_dir, img_name)
-                img_name_without_ext = os.path.splitext(img_name)[0]
-                txt_path = os.path.join(args.data_config.img_dir, img_name_without_ext + '.txt')
+                # Use control filename as key (strip _template suffix if present)
+                img_name_key = os.path.splitext(img_name)[0]
+                if img_name_key.endswith('_template'):
+                    img_name_key = img_name_key[:-9]  # Remove '_template'
+                txt_path = os.path.join(args.data_config.img_dir, img_name_key + '.txt')
 
                 img = Image.open(img_path).convert('RGB')
                 calculated_width, calculated_height, _ = calculate_dimensions(1024 * 1024, img.size[0] / img.size[1])
@@ -164,9 +180,9 @@ def main():
                     torch.save({
                         'prompt_embeds': prompt_embeds[0].to('cpu'),
                         'prompt_embeds_mask': pem_mask
-                    }, os.path.join(txt_cache_dir, img_name_without_ext + '.pt'))
+                    }, os.path.join(txt_cache_dir, img_name_key + '.txt' + '.pt'))
                 else:
-                    cached_text_embeddings[img_name_without_ext + '.txt'] = {
+                    cached_text_embeddings[img_name_key + '.txt'] = {
                         'prompt_embeds': prompt_embeds[0].to('cpu'),
                         'prompt_embeds_mask': pem_mask
                     }
@@ -179,7 +195,7 @@ def main():
                     max_sequence_length=1024,
                 )
                 pem_mask_empty = prompt_embeds_mask_empty[0].to('cpu') if prompt_embeds_mask_empty is not None else None
-                cached_text_embeddings[img_name_without_ext + '.txt' + 'empty_embedding'] = {
+                cached_text_embeddings[img_name_key + '.txt' + 'empty_embedding'] = {
                     'prompt_embeds': prompt_embeds_empty[0].to('cpu'),
                     'prompt_embeds_mask': pem_mask_empty
                 }
@@ -237,6 +253,8 @@ def main():
     )
     
     if args.quantize:
+        if not HAS_QUANTO or not HAS_BNB:
+            raise ImportError("quantize=True requires bitsandbytes and optimum.quanto. Set quantize: false in config or install: pip install bitsandbytes optimum-quanto")
         torch_dtype = weight_dtype
         device = accelerator.device
         all_blocks = list(flux_transformer.transformer_blocks)
@@ -297,6 +315,8 @@ def main():
     flux_transformer.enable_gradient_checkpointing()
 
     if args.adam8bit:
+        if not HAS_BNB:
+            raise ImportError("adam8bit=True requires bitsandbytes. Set adam8bit: false in config or install: pip install bitsandbytes")
         optimizer = bnb.optim.Adam8bit(lora_layers, lr=args.learning_rate, betas=(args.adam_beta1, args.adam_beta2))
     else:
         optimizer = optimizer_cls(
@@ -346,7 +366,7 @@ def main():
         disable=not accelerator.is_local_main_process,
     )
 
-    vae_scale_factor = 2 ** len(vae.config.temperal_downsample)
+    vae_scale_factor = 2 ** len(vae.config.temporal_downsample)
 
     for epoch in range(1):
         train_loss = 0.0
@@ -394,13 +414,6 @@ def main():
 
                 sigmas = get_sigmas(timesteps, n_dim=pixel_latents.ndim, dtype=pixel_latents.dtype)
                 noisy_model_input = (1.0 - sigmas) * pixel_latents + sigmas * noise
-
-                # DEBUG: Log shapes
-                if step == 0:
-                    logger.info(f"[DEBUG] pixel_latents shape: {pixel_latents.shape}")
-                    logger.info(f"[DEBUG] noisy_model_input shape: {noisy_model_input.shape}")
-                    logger.info(f"[DEBUG] control_img shape: {control_img.shape}")
-                    logger.info(f"[DEBUG] vae_scale_factor: {vae_scale_factor}")
 
                 packed_noisy_model_input = QwenImageEditPipeline._pack_latents(
                     noisy_model_input, bsz, noisy_model_input.shape[2], noisy_model_input.shape[3], noisy_model_input.shape[4]

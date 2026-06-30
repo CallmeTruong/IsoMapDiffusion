@@ -137,19 +137,18 @@ class CustomImageDataset(Dataset):
                 control_img = self._load_image(ctrl_path)
 
             # Load caption/prompt
-            txt_path = img_path.rsplit('.', 1)[0] + '.' + self.caption_type
+            # Use control filename as cache key (matches precompute iteration)
+            img_name_for_cache = ctrl_path.split('/')[-1].rsplit('.', 1)[0] + '.txt'
+            empty_key = img_name_for_cache + 'empty_embedding'
 
             if self.cached_text_embeddings is not None:
-                txt_key = txt_path.split('/')[-1]
-                empty_key = txt_key + 'empty_embedding'
-
                 if empty_key in self.cached_text_embeddings and \
                    (np.random.random() < self.caption_dropout_rate):
                     emb = self.cached_text_embeddings[empty_key]
                     return target_img, emb['prompt_embeds'], emb['prompt_embeds_mask'], control_img
 
-                if txt_key in self.cached_text_embeddings:
-                    emb = self.cached_text_embeddings[txt_key]
+                if img_name_for_cache in self.cached_text_embeddings:
+                    emb = self.cached_text_embeddings[img_name_for_cache]
                     return target_img, emb['prompt_embeds'], emb['prompt_embeds_mask'], control_img
 
                 # Fallback: empty
