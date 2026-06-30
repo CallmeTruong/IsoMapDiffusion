@@ -366,7 +366,7 @@ def main():
         disable=not accelerator.is_local_main_process,
     )
 
-    vae_scale_factor = 2 ** len(vae.config.temporal_downsample)
+    vae_scale_factor = 2 ** len(vae.config.temperal_downsample)
 
     for epoch in range(1):
         train_loss = 0.0
