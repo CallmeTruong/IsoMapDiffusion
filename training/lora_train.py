@@ -231,8 +231,9 @@ def main():
                 img_arr = torch.from_numpy((np.array(img) / 127.5) - 1)
                 img_arr = img_arr.permute(2, 0, 1).unsqueeze(0)
                 pixel_values = img_arr.to(dtype=weight_dtype).to(accelerator.device)
-        
-                pixel_latents = vae.encode(pixel_values).latent_dist.sample().to('cpu')  # Keep batch dim: [1, C, H, W]
+                pixel_values = pixel_values.unsqueeze(2)  # VAE needs [B, C, T, H, W]
+
+                pixel_latents = vae.encode(pixel_values).latent_dist.sample().to('cpu')[0]  # [C, H, W]
                 cached_image_embeddings[img_name] = pixel_latents
             
             # Control images
@@ -245,8 +246,9 @@ def main():
                 img_arr = torch.from_numpy((np.array(img) / 127.5) - 1)
                 img_arr = img_arr.permute(2, 0, 1).unsqueeze(0)
                 pixel_values = img_arr.to(dtype=weight_dtype).to(accelerator.device)
-        
-                pixel_latents = vae.encode(pixel_values).latent_dist.sample().to('cpu')  # Keep batch dim: [1, C, H, W]
+                pixel_values = pixel_values.unsqueeze(2)  # VAE needs [B, C, T, H, W]
+
+                pixel_latents = vae.encode(pixel_values).latent_dist.sample().to('cpu')[0]  # [C, H, W]
                 cached_image_embeddings_control[img_name] = pixel_latents
 
         vae.to('cpu')
