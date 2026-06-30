@@ -252,6 +252,8 @@ def main():
 
                 pixel_latents = vae.encode(pixel_values).latent_dist.sample().to('cpu')[0]  # [C, H, W]
                 cached_image_embeddings[img_name] = pixel_latents
+                
+            print(f"[DEBUG] Cached target latents shape: {list(cached_image_embeddings.values())[0].shape}")
             
             # Control images
             cached_image_embeddings_control = {}
@@ -272,6 +274,8 @@ def main():
 
                 pixel_latents = vae.encode(pixel_values).latent_dist.sample().to('cpu')[0]  # [C, H, W]
                 cached_image_embeddings_control[img_name] = pixel_latents
+                
+            print(f"[DEBUG] Cached control latents shape: {list(cached_image_embeddings_control.values())[0].shape}")
 
         vae.to('cpu')
         torch.cuda.empty_cache()
@@ -470,10 +474,26 @@ def main():
                 sigmas = get_sigmas(timesteps, n_dim=pixel_latents.ndim, dtype=pixel_latents.dtype)
                 noisy_model_input = (1.0 - sigmas) * pixel_latents + sigmas * noise
 
+                # DEBUG: Check shapes
+                print(f"[DEBUG] pixel_latents shape: {pixel_latents.shape}")  # [B, T, C, H, W]
+                print(f"[DEBUG] control_img shape: {control_img.shape}")
+                print(f"[DEBUG] bsz: {bsz}")
+
                 # Squeeze T dimension for pack_latents: [B, 1, C, H, W] -> [B, C, H, W]
                 pixel_latents_4d = pixel_latents.squeeze(1)
                 control_img_4d = control_img.squeeze(1)
-
+                
+                print(f"[DEBUG] pixel_latents_4d shape: {pixel_latents_4d.shape}")  # [B, C, H, W]
+                print(f"[DEBUG] control_img_4d shape: {control_img_4d.shape}")
+                
+                # Check if H and W are divisible by 2 (required by _pack_latents)
+                H, W = pixel_latents_4d.shape[2], pixel_latents_4d.shape[3]
+                if H % 2 != 0 or W % 2 != 0:
+                    raise ValueError(f"ERROR: H={H} or W={W} not divisible by 2!")
+                
+                if H != W:
+                    raise ValueError(f"ERROR: Non-square latent! H={H}, W={W}")
+                
                 packed_noisy_model_input = QwenImageEditPipeline._pack_latents(
                     pixel_latents_4d, bsz, pixel_latents_4d.shape[1], pixel_latents_4d.shape[2], pixel_latents_4d.shape[3]
                 )
