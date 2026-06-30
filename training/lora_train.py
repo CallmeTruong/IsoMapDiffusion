@@ -158,15 +158,17 @@ def main():
                     num_images_per_prompt=1,
                     max_sequence_length=1024,
                 )
+                # Handle case where prompt_embeds_mask might be None
+                pem_mask = prompt_embeds_mask[0].to('cpu') if prompt_embeds_mask is not None else None
                 if args.save_cache_on_disk:
                     torch.save({
                         'prompt_embeds': prompt_embeds[0].to('cpu'),
-                        'prompt_embeds_mask': prompt_embeds_mask[0].to('cpu')
+                        'prompt_embeds_mask': pem_mask
                     }, os.path.join(txt_cache_dir, img_name_without_ext + '.pt'))
                 else:
                     cached_text_embeddings[img_name_without_ext + '.txt'] = {
                         'prompt_embeds': prompt_embeds[0].to('cpu'),
-                        'prompt_embeds_mask': prompt_embeds_mask[0].to('cpu')
+                        'prompt_embeds_mask': pem_mask
                     }
                 
                 prompt_embeds_empty, prompt_embeds_mask_empty = text_encoding_pipeline.encode_prompt(
@@ -176,9 +178,10 @@ def main():
                     num_images_per_prompt=1,
                     max_sequence_length=1024,
                 )
+                pem_mask_empty = prompt_embeds_mask_empty[0].to('cpu') if prompt_embeds_mask_empty is not None else None
                 cached_text_embeddings[img_name_without_ext + '.txt' + 'empty_embedding'] = {
                     'prompt_embeds': prompt_embeds_empty[0].to('cpu'),
-                    'prompt_embeds_mask': prompt_embeds_mask_empty[0].to('cpu')
+                    'prompt_embeds_mask': pem_mask_empty
                 }
 
     vae = AutoencoderKLQwenImage.from_pretrained(
