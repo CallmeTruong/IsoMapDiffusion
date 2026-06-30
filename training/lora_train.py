@@ -153,67 +153,66 @@ def main():
                 os.makedirs(txt_cache_dir, exist_ok=True)
             else:
                 cached_text_embeddings = {}
-                
-            for img_name in tqdm([i for i in os.listdir(args.data_config.control_dir) if i.endswith(('.png', '.jpg'))]):
+            
+            # Batch processing for faster encoding
+            batch_size = 8
+            all_images = []
+            all_prompts = []
+            all_keys = []
+            
+            for img_name in os.listdir(args.data_config.control_dir):
+                if not img_name.endswith(('.png', '.jpg')):
+                    continue
                 img_path = os.path.join(args.data_config.control_dir, img_name)
-                # Use control filename as key (strip _template suffix if present)
                 img_name_key = os.path.splitext(img_name)[0]
                 if img_name_key.endswith('_template'):
-                    img_name_key = img_name_key[:-9]  # Remove '_template'
+                    img_name_key = img_name_key[:-9]
                 txt_path = os.path.join(args.data_config.img_dir, img_name_key + '.txt')
-
+                
                 img = Image.open(img_path).convert('RGB')
-                # Match dataset: crop to square, then resize
                 w, h = img.size
                 min_dim = min(w, h)
-                left = (w - min_dim) // 2
-                top = (h - min_dim) // 2
-                img = img.crop((left, top, left + min_dim, top + min_dim))
-                prompt_image = img.resize((args.data_config.img_size, args.data_config.img_size), Image.Resampling.LANCZOS)
+                img = img.crop(((w - min_dim) // 2, (h - min_dim) // 2, (w + min_dim) // 2, (h + min_dim) // 2))
+                img = img.resize((args.data_config.img_size, args.data_config.img_size), Image.Resampling.LANCZOS)
                 
                 prompt = open(txt_path, encoding='utf-8').read() if os.path.exists(txt_path) else ""
-                prompt_embeds, prompt_embeds_mask = text_encoding_pipeline.encode_prompt(
-                    image=prompt_image,
-                    prompt=[prompt] if prompt else [" "],
-                    device=text_encoding_pipeline.device,
-                    num_images_per_prompt=1,
-                    max_sequence_length=1024,
-                )
-                # Handle case where prompt_embeds_mask might be None
-                pem_mask = prompt_embeds_mask[0].to('cpu') if prompt_embeds_mask is not None else None
-                if args.save_cache_on_disk:
-                    torch.save({
-                        'prompt_embeds': prompt_embeds[0].to('cpu'),
-                        'prompt_embeds_mask': pem_mask
-                    }, os.path.join(txt_cache_dir, img_name_key + '.txt' + '.pt'))
-                    torch.save({
-                        'prompt_embeds': prompt_embeds[0].to('cpu'),
-                        'prompt_embeds_mask': pem_mask
-                    }, os.path.join(txt_cache_dir, img_name_key + '.txt' + '_empty.pt'))
-                else:
-                    cached_text_embeddings[img_name_key + '.txt'] = {
-                        'prompt_embeds': prompt_embeds[0].to('cpu'),
-                        'prompt_embeds_mask': pem_mask
-                    }
+                all_images.append(img)
+                all_prompts.append(prompt if prompt else " ")
+                all_keys.append(img_name_key)
+            
+            # Process in batches
+            for batch_start in tqdm(range(0, len(all_images), batch_size)):
+                batch_end = min(batch_start + batch_size, len(all_images))
+                batch_images = all_images[batch_start:batch_end]
+                batch_prompts = all_prompts[batch_start:batch_end]
+                batch_keys = all_keys[batch_start:batch_end]
                 
-                prompt_embeds_empty, prompt_embeds_mask_empty = text_encoding_pipeline.encode_prompt(
-                    image=prompt_image,
-                    prompt=[' '],
+                # Encode batch
+                prompt_embeds, prompt_embeds_mask = text_encoding_pipeline.encode_prompt(
+                    image=batch_images,
+                    prompt=batch_prompts,
                     device=text_encoding_pipeline.device,
                     num_images_per_prompt=1,
                     max_sequence_length=1024,
                 )
-                pem_mask_empty = prompt_embeds_mask_empty[0].to('cpu') if prompt_embeds_mask_empty is not None else None
-                if args.save_cache_on_disk:
-                    torch.save({
-                        'prompt_embeds': prompt_embeds_empty[0].to('cpu'),
-                        'prompt_embeds_mask': pem_mask_empty
-                    }, os.path.join(txt_cache_dir, img_name_key + '.txt' + '_empty.pt'))
-                else:
-                    cached_text_embeddings[img_name_key + '.txt' + 'empty_embedding'] = {
-                        'prompt_embeds': prompt_embeds_empty[0].to('cpu'),
-                        'prompt_embeds_mask': pem_mask_empty
+                
+                for i, key in enumerate(batch_keys):
+                    pem_mask = prompt_embeds_mask[i].to('cpu') if prompt_embeds_mask is not None else None
+                    emb_data = {
+                        'prompt_embeds': prompt_embeds[i].to('cpu'),
+                        'prompt_embeds_mask': pem_mask
                     }
+                    empty_data = {
+                        'prompt_embeds': prompt_embeds[i].to('cpu'),  # Reuse same emb for empty
+                        'prompt_embeds_mask': pem_mask
+                    }
+                    
+                    if args.save_cache_on_disk:
+                        torch.save(emb_data, os.path.join(txt_cache_dir, key + '.txt.pt'))
+                        torch.save(empty_data, os.path.join(txt_cache_dir, key + '_empty.pt'))
+                    else:
+                        cached_text_embeddings[key + '.txt'] = emb_data
+                        cached_text_embeddings[key + '.txt' + 'empty_embedding'] = empty_data
 
     vae = AutoencoderKLQwenImage.from_pretrained(
         args.pretrained_model_name_or_path,
@@ -233,48 +232,69 @@ def main():
     
     if args.precompute_image_embeddings:
         with torch.no_grad():
-            # Target images - resize to match dataset logic
+            batch_size = 8  # Process multiple images at once for faster VAE encoding
+            
+            # === Target images ===
             cached_image_embeddings = {}
-            for img_name in tqdm([i for i in os.listdir(args.data_config.img_dir) if i.endswith(('.png', '.jpg'))]):
-                img = Image.open(os.path.join(args.data_config.img_dir, img_name)).convert('RGB')
-                # Match dataset: crop to square, then resize
-                w, h = img.size
-                min_dim = min(w, h)
-                left = (w - min_dim) // 2
-                top = (h - min_dim) // 2
-                img = img.crop((left, top, left + min_dim, top + min_dim))
-                img = img.resize((args.data_config.img_size, args.data_config.img_size), Image.Resampling.LANCZOS)
-
-                img_arr = torch.from_numpy((np.array(img) / 127.5) - 1)
-                img_arr = img_arr.permute(2, 0, 1).unsqueeze(0)
-                pixel_values = img_arr.to(dtype=weight_dtype).to(accelerator.device)
-                pixel_values = pixel_values.unsqueeze(2)  # VAE needs [B, C, T, H, W]
-
-                pixel_latents = vae.encode(pixel_values).latent_dist.sample().to('cpu')[0]  # [C, H, W]
-                cached_image_embeddings[img_name] = pixel_latents
+            target_files = [f for f in os.listdir(args.data_config.img_dir) if f.endswith(('.png', '.jpg'))]
+            
+            for batch_start in tqdm(range(0, len(target_files), batch_size), desc="Encoding target latents"):
+                batch_end = min(batch_start + batch_size, len(target_files))
+                batch_imgs = []
+                batch_names = []
                 
+                for img_name in target_files[batch_start:batch_end]:
+                    img = Image.open(os.path.join(args.data_config.img_dir, img_name)).convert('RGB')
+                    w, h = img.size
+                    min_dim = min(w, h)
+                    img = img.crop(((w - min_dim) // 2, (h - min_dim) // 2, (w + min_dim) // 2, (h + min_dim) // 2))
+                    img = img.resize((args.data_config.img_size, args.data_config.img_size), Image.Resampling.LANCZOS)
+                    batch_imgs.append(img)
+                    batch_names.append(img_name)
+                
+                # Stack images into batch
+                batch_arr = np.stack([(np.array(img) / 127.5) - 1 for img in batch_imgs])  # [B, H, W, C]
+                batch_tensor = torch.from_numpy(batch_arr).permute(0, 3, 1, 2)  # [B, C, H, W]
+                batch_tensor = batch_tensor.unsqueeze(2)  # [B, C, 1, H, W]
+                pixel_values = batch_tensor.to(dtype=weight_dtype).to(accelerator.device)
+                
+                # Encode batch
+                latents_dist = vae.encode(pixel_values).latent_dist
+                # Sample and store individually
+                for i, name in enumerate(batch_names):
+                    sampled = latents_dist.sample()[i].to('cpu')  # [C, H, W]
+                    cached_image_embeddings[name] = sampled
+            
             print(f"[DEBUG] Cached target latents shape: {list(cached_image_embeddings.values())[0].shape}")
             
-            # Control images
+            # === Control images ===
             cached_image_embeddings_control = {}
-            for img_name in tqdm([i for i in os.listdir(args.data_config.control_dir) if i.endswith(('.png', '.jpg'))]):
-                img = Image.open(os.path.join(args.data_config.control_dir, img_name)).convert('RGB')
-                # Match dataset: crop to square, then resize
-                w, h = img.size
-                min_dim = min(w, h)
-                left = (w - min_dim) // 2
-                top = (h - min_dim) // 2
-                img = img.crop((left, top, left + min_dim, top + min_dim))
-                img = img.resize((args.data_config.img_size, args.data_config.img_size), Image.Resampling.LANCZOS)
-
-                img_arr = torch.from_numpy((np.array(img) / 127.5) - 1)
-                img_arr = img_arr.permute(2, 0, 1).unsqueeze(0)
-                pixel_values = img_arr.to(dtype=weight_dtype).to(accelerator.device)
-                pixel_values = pixel_values.unsqueeze(2)  # VAE needs [B, C, T, H, W]
-
-                pixel_latents = vae.encode(pixel_values).latent_dist.sample().to('cpu')[0]  # [C, H, W]
-                cached_image_embeddings_control[img_name] = pixel_latents
+            control_files = [f for f in os.listdir(args.data_config.control_dir) if f.endswith(('.png', '.jpg'))]
+            
+            for batch_start in tqdm(range(0, len(control_files), batch_size), desc="Encoding control latents"):
+                batch_end = min(batch_start + batch_size, len(control_files))
+                batch_imgs = []
+                batch_names = []
                 
+                for img_name in control_files[batch_start:batch_end]:
+                    img = Image.open(os.path.join(args.data_config.control_dir, img_name)).convert('RGB')
+                    w, h = img.size
+                    min_dim = min(w, h)
+                    img = img.crop(((w - min_dim) // 2, (h - min_dim) // 2, (w + min_dim) // 2, (h + min_dim) // 2))
+                    img = img.resize((args.data_config.img_size, args.data_config.img_size), Image.Resampling.LANCZOS)
+                    batch_imgs.append(img)
+                    batch_names.append(img_name)
+                
+                batch_arr = np.stack([(np.array(img) / 127.5) - 1 for img in batch_imgs])
+                batch_tensor = torch.from_numpy(batch_arr).permute(0, 3, 1, 2)
+                batch_tensor = batch_tensor.unsqueeze(2)
+                pixel_values = batch_tensor.to(dtype=weight_dtype).to(accelerator.device)
+                
+                latents_dist = vae.encode(pixel_values).latent_dist
+                for i, name in enumerate(batch_names):
+                    sampled = latents_dist.sample()[i].to('cpu')
+                    cached_image_embeddings_control[name] = sampled
+            
             print(f"[DEBUG] Cached control latents shape: {list(cached_image_embeddings_control.values())[0].shape}")
 
         vae.to('cpu')
