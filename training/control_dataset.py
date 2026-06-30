@@ -209,18 +209,19 @@ def loader(
     )
 
     def collate_fn(batch):
-        """Add batch dimension to latents. Returns 4D tensors [B, C, H, W]."""
+        """Stack batch tensors. Dataset returns [C, H, W], collate to [B, C, H, W]."""
         target_img, prompt_embeds, prompt_embeds_mask, control_img = zip(*batch)
         
-        # Add batch dim: [C, H, W] -> [1, C, H, W] -> stack -> [B, C, H, W]
-        target_img = [t.unsqueeze(0) if t.dim() == 3 else t for t in target_img]
-        control_img = [c.unsqueeze(0) if c.dim() == 3 else c for c in control_img]
+        target_img_stacked = torch.stack(target_img)
+        control_img_stacked = torch.stack(control_img)
+        print(f"[DEBUG COLLECTE] target_img stacked: {target_img_stacked.shape}, control_img: {control_img_stacked.shape}")
         
+        # Already [C, H, W] from dataset, stack to [B, C, H, W]
         return (
-            torch.stack(target_img),  # [B, C, H, W]
+            target_img_stacked,  # [B, C, H, W]
             torch.stack(prompt_embeds),  # [B, ...]
             torch.stack(prompt_embeds_mask),  # [B, ...]
-            torch.stack(control_img),  # [B, C, H, W]
+            control_img_stacked,  # [B, C, H, W]
         )
 
     return DataLoader(

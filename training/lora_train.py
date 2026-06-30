@@ -488,13 +488,19 @@ def main():
                         pixel_latents = img.to(dtype=weight_dtype).to(accelerator.device)
 
                     # Ensure pixel_latents is 5D: [B, C, 1, H, W]
+                    print(f"[DEBUG] pixel_latents BEFORE dim check: {pixel_latents.shape}")
                     if pixel_latents.dim() == 4:
+                        print("[DEBUG] pixel_latents is 4D, unsqueeze(2)")
                         pixel_latents = pixel_latents.unsqueeze(2)
+                    elif pixel_latents.dim() == 5:
+                        print("[DEBUG] pixel_latents is 5D, no change")
                     elif pixel_latents.dim() > 5:
                         pixel_latents = pixel_latents.squeeze()
                         if pixel_latents.dim() == 4:
                             pixel_latents = pixel_latents.unsqueeze(2)
+                    print(f"[DEBUG] pixel_latents AFTER unsqueeze: {pixel_latents.shape}")
                     pixel_latents = pixel_latents.permute(0, 2, 1, 3, 4)
+                    print(f"[DEBUG] pixel_latents AFTER permute: {pixel_latents.shape}")
 
                     # Ensure control_img is 5D: [B, C, 1, H, W]
                     if control_img.dim() == 4:
