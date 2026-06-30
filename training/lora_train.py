@@ -256,8 +256,9 @@ def main():
         text_encoding_pipeline.to("cpu")
         torch.cuda.empty_cache()
     
-    del text_encoding_pipeline
-    gc.collect()
+    if not args.precompute_text_embeddings:
+        del text_encoding_pipeline
+        gc.collect()
 
     flux_transformer = QwenImageTransformer2DModel.from_pretrained(
         args.pretrained_model_name_or_path,
@@ -395,9 +396,13 @@ def main():
 
                 with torch.no_grad():
                     if not args.precompute_image_embeddings:
+                        if str(vae.device) == 'cpu':
+                            vae.to(accelerator.device, dtype=weight_dtype)
                         pixel_values = img.to(dtype=weight_dtype).to(accelerator.device)
                         pixel_values = pixel_values.unsqueeze(2)
                         pixel_latents = vae.encode(pixel_values).latent_dist.sample()
+                        vae.to('cpu')
+                        torch.cuda.empty_cache()
                     else:
                         pixel_latents = img.to(dtype=weight_dtype).to(accelerator.device)
 
