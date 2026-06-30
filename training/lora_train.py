@@ -329,9 +329,13 @@ def main():
     if accelerator.is_main_process:
         accelerator.init_trackers(args.tracker_project_name, {"test": None})
 
-    total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+    # Flatten data_config for easier access
+    train_batch_size = args.data_config.train_batch_size if hasattr(args, 'data_config') and args.data_config is not None else getattr(args, 'train_batch_size', 1)
+    num_workers = args.data_config.num_workers if hasattr(args, 'data_config') and args.data_config is not None else getattr(args, 'num_workers', 4)
+
+    total_batch_size = train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
     logger.info("***** Running training *****")
-    logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
+    logger.info(f"  Instantaneous batch size per device = {train_batch_size}")
     logger.info(f"  Total train batch size = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
 
@@ -443,7 +447,7 @@ def main():
                 )
                 loss = loss.mean()
 
-                avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
+                avg_loss = accelerator.gather(loss.repeat(train_batch_size)).mean()
                 train_loss += avg_loss.item() / args.gradient_accumulation_steps
 
                 accelerator.backward(loss)
