@@ -399,7 +399,14 @@ def main():
                     else:
                         pixel_latents = img.to(dtype=weight_dtype).to(accelerator.device)
 
+                    # Ensure pixel_latents is 5D: [B, C, 1, H, W]
+                    if pixel_latents.dim() == 4:
+                        pixel_latents = pixel_latents.unsqueeze(2)
                     pixel_latents = pixel_latents.permute(0, 2, 1, 3, 4)
+
+                    # Ensure control_img is 5D: [B, C, 1, H, W]
+                    if control_img.dim() == 4:
+                        control_img = control_img.unsqueeze(2)
                     control_img = control_img.permute(0, 2, 1, 3, 4)
 
                     latents_mean = torch.tensor(vae.config.latents_mean).view(1, 1, vae.config.z_dim, 1, 1).to(
