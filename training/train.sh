@@ -22,4 +22,4 @@ echo "Config: $CONFIG_PATH"
 echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'N/A')"
 echo "=========================================="
 
-python training/lora_train.py --config "$CONFIG_PATH"
+python -m training.lora_train --config "$CONFIG_PATH"
