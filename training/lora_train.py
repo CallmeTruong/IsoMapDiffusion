@@ -229,7 +229,7 @@ def main():
                 img = text_encoding_pipeline.image_processor.resize(img, calculated_height, calculated_width)
 
                 img_arr = torch.from_numpy((np.array(img) / 127.5) - 1)
-                img_arr = img_arr.permute(2, 0, 1).unsqueeze(0).unsqueeze(2)
+                img_arr = img_arr.permute(2, 0, 1).unsqueeze(0)
                 pixel_values = img_arr.to(dtype=weight_dtype).to(accelerator.device)
         
                 pixel_latents = vae.encode(pixel_values).latent_dist.sample().to('cpu')  # Keep batch dim: [1, C, H, W]
@@ -243,7 +243,7 @@ def main():
                 img = text_encoding_pipeline.image_processor.resize(img, calculated_height, calculated_width)
 
                 img_arr = torch.from_numpy((np.array(img) / 127.5) - 1)
-                img_arr = img_arr.permute(2, 0, 1).unsqueeze(0).unsqueeze(2)
+                img_arr = img_arr.permute(2, 0, 1).unsqueeze(0)
                 pixel_values = img_arr.to(dtype=weight_dtype).to(accelerator.device)
         
                 pixel_latents = vae.encode(pixel_values).latent_dist.sample().to('cpu')  # Keep batch dim: [1, C, H, W]
@@ -402,11 +402,19 @@ def main():
                     # Ensure pixel_latents is 5D: [B, C, 1, H, W]
                     if pixel_latents.dim() == 4:
                         pixel_latents = pixel_latents.unsqueeze(2)
+                    elif pixel_latents.dim() > 5:
+                        pixel_latents = pixel_latents.squeeze()
+                        if pixel_latents.dim() == 4:
+                            pixel_latents = pixel_latents.unsqueeze(2)
                     pixel_latents = pixel_latents.permute(0, 2, 1, 3, 4)
 
                     # Ensure control_img is 5D: [B, C, 1, H, W]
                     if control_img.dim() == 4:
                         control_img = control_img.unsqueeze(2)
+                    elif control_img.dim() > 5:
+                        control_img = control_img.squeeze()
+                        if control_img.dim() == 4:
+                            control_img = control_img.unsqueeze(2)
                     control_img = control_img.permute(0, 2, 1, 3, 4)
 
                     latents_mean = torch.tensor(vae.config.latents_mean).view(1, 1, vae.config.z_dim, 1, 1).to(
