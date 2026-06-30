@@ -206,7 +206,7 @@ def main():
                 img_arr = img_arr.permute(2, 0, 1).unsqueeze(0).unsqueeze(2)
                 pixel_values = img_arr.to(dtype=weight_dtype).to(accelerator.device)
         
-                pixel_latents = vae.encode(pixel_values).latent_dist.sample().to('cpu')[0]
+                pixel_latents = vae.encode(pixel_values).latent_dist.sample().to('cpu')  # Keep batch dim: [1, C, H, W]
                 cached_image_embeddings[img_name] = pixel_latents
             
             # Control images
@@ -220,7 +220,7 @@ def main():
                 img_arr = img_arr.permute(2, 0, 1).unsqueeze(0).unsqueeze(2)
                 pixel_values = img_arr.to(dtype=weight_dtype).to(accelerator.device)
         
-                pixel_latents = vae.encode(pixel_values).latent_dist.sample().to('cpu')[0]
+                pixel_latents = vae.encode(pixel_values).latent_dist.sample().to('cpu')  # Keep batch dim: [1, C, H, W]
                 cached_image_embeddings_control[img_name] = pixel_latents
 
         vae.to('cpu')
@@ -394,6 +394,13 @@ def main():
 
                 sigmas = get_sigmas(timesteps, n_dim=pixel_latents.ndim, dtype=pixel_latents.dtype)
                 noisy_model_input = (1.0 - sigmas) * pixel_latents + sigmas * noise
+
+                # DEBUG: Log shapes
+                if step == 0:
+                    logger.info(f"[DEBUG] pixel_latents shape: {pixel_latents.shape}")
+                    logger.info(f"[DEBUG] noisy_model_input shape: {noisy_model_input.shape}")
+                    logger.info(f"[DEBUG] control_img shape: {control_img.shape}")
+                    logger.info(f"[DEBUG] vae_scale_factor: {vae_scale_factor}")
 
                 packed_noisy_model_input = QwenImageEditPipeline._pack_latents(
                     noisy_model_input, bsz, noisy_model_input.shape[2], noisy_model_input.shape[3], noisy_model_input.shape[4]
