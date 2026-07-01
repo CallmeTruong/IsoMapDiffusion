@@ -145,6 +145,13 @@ def main():
             os.makedirs(cache_dir, exist_ok=True)
         accelerator.wait_for_everyone()
         cache_dir = os.path.join(args.output_dir, "cache")
+        
+        # Clear old cache BEFORE precomputing (prevents stale data issues)
+        if accelerator.is_main_process and os.path.exists(cache_dir):
+            import shutil
+            shutil.rmtree(cache_dir)
+            os.makedirs(cache_dir, exist_ok=True)
+            print(f"Cleared old cache at {cache_dir}")
 
     if args.precompute_text_embeddings:
         with torch.no_grad():
@@ -225,13 +232,6 @@ def main():
         subfolder="vae",
     )
     vae.to(accelerator.device, dtype=weight_dtype)
-
-    # Clear old cache if it exists (might have wrong dimensions)
-    old_cache_dir = os.path.join(args.output_dir, "cache")
-    if os.path.exists(old_cache_dir):
-        import shutil
-        shutil.rmtree(old_cache_dir)
-        print(f"Cleared old cache at {old_cache_dir}")
 
     cached_image_embeddings = None
     cached_image_embeddings_control = None
