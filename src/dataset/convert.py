@@ -17,9 +17,9 @@ from pathlib import Path
 from ..constants import DEFAULT_PROMPT
 
 
-def convert_to_oxen_format(
+def convert_to_format(
     dataset_dir: str = None,
-    output_csv: str = "oxen_dataset.csv",
+    output_csv: str = "dataset.csv",
     prompt: str = DEFAULT_PROMPT,
 ):
     """
@@ -74,14 +74,14 @@ def convert_to_oxen_format(
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Convert dataset to Oxen format")
+    parser = argparse.ArgumentParser(description="Convert dataset to format")
     parser.add_argument("--dataset", type=str, help="Dataset directory")
-    parser.add_argument("--output", type=str, default="oxen_dataset.csv", help="Output CSV")
+    parser.add_argument("--output", type=str, default="dataset.csv", help="Output CSV")
     parser.add_argument("--prompt", type=str, default=DEFAULT_PROMPT, help="Training prompt")
 
     args = parser.parse_args()
 
-    output = convert_to_oxen_format(
+    output = convert_to_format(
         dataset_dir=args.dataset,
         output_csv=args.output,
         prompt=args.prompt,
