@@ -472,7 +472,8 @@ def main():
     if not args.precompute_text_embeddings:
         text_encoding_pipeline.to(accelerator.device)
     
-    for epoch in range(1):
+    # Infinite training loop
+    while global_step < args.max_train_steps:
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(flux_transformer):
@@ -635,7 +636,8 @@ def main():
             if global_step >= args.max_train_steps:
                 break
 
-    accelerator.wait_for_everyone()
+        # Log epoch completion
+        logger.info(f"Completed epoch, continuing training...")
     accelerator.end_training()
 
 
