@@ -229,6 +229,18 @@ class ControlDataset(Dataset):
             if self.caption_dropout_rate > 0 and throw_one(self.caption_dropout_rate):
                 caption = " "  # Empty prompt for dropout
 
+            # If using cached text embeddings, return them directly
+            if self.cached_text_embeddings is not None:
+                txt_name = img_name.rsplit('.', 1)[0] + '.txt'
+                # Use empty embedding if caption is dropped
+                embedding_key = f"{txt_name}empty_embedding" if caption.strip() == "" else txt_name
+                cached = self.cached_text_embeddings.get(embedding_key, self.cached_text_embeddings.get(txt_name))
+                if cached is None:
+                    raise KeyError(f"Cached text embedding not found for {txt_name}")
+                prompt_embeds = cached['prompt_embeds']
+                prompt_embeds_mask = cached['prompt_embeds_mask']
+                return target_tensor, prompt_embeds, prompt_embeds_mask, control_tensor
+
             return target_tensor, caption, control_tensor
 
         except Exception as e:
