@@ -210,14 +210,22 @@ def main():
                 )
                 
                 for i, key in enumerate(batch_keys):
+                    pem = prompt_embeds[i].to('cpu')
                     pem_mask = prompt_embeds_mask[i].to('cpu') if prompt_embeds_mask is not None else None
+                    
+                    # Debug first batch
+                    if batch_start == 0:
+                        print(f"[PRECOMPUTE DEBUG] key={key}")
+                        print(f"  prompt_embeds shape: {pem.shape}")
+                        print(f"  prompt_embeds_mask shape: {pem_mask.shape if pem_mask is not None else 'None'}")
+                    
                     emb_data = {
-                        'prompt_embeds': prompt_embeds[i].to('cpu'),
+                        'prompt_embeds': pem,
                         'prompt_embeds_mask': pem_mask
                     }
                     empty_data = {
-                        'prompt_embeds': prompt_embeds[i].to('cpu'),  # Reuse same emb for empty
-                        'prompt_embeds_mask': pem_mask
+                        'prompt_embeds': pem.clone(),
+                        'prompt_embeds_mask': pem_mask.clone() if pem_mask is not None else None
                     }
                     
                     if args.save_cache_on_disk:
@@ -225,7 +233,7 @@ def main():
                         torch.save(empty_data, os.path.join(txt_cache_dir, key + '_empty.pt'))
                     else:
                         cached_text_embeddings[key + '.txt'] = emb_data
-                        cached_text_embeddings[key + '.txt' + 'empty_embedding'] = empty_data
+                        cached_text_embeddings[key + '.txt' + '_empty.pt'] = empty_data
 
     vae = AutoencoderKLQwenImage.from_pretrained(
         args.pretrained_model_name_or_path,
@@ -469,6 +477,8 @@ def main():
             with accelerator.accumulate(flux_transformer):
                 if args.precompute_text_embeddings:
                     img, prompt_embeds, prompt_embeds_mask, control_img = batch
+                    print(f"[TRAIN DEBUG] prompt_embeds shape: {prompt_embeds.shape}")
+                    print(f"[TRAIN DEBUG] prompt_embeds_mask shape: {prompt_embeds_mask.shape}")
                     prompt_embeds = prompt_embeds.to(dtype=weight_dtype).to(accelerator.device)
                     prompt_embeds_mask = prompt_embeds_mask.to(dtype=torch.int32).to(accelerator.device)
                     control_img = control_img.to(dtype=weight_dtype).to(accelerator.device)

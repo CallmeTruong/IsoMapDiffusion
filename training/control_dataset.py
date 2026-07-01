@@ -25,6 +25,18 @@ def image_resize(img, max_size=512):
     return img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
 
+def _build_cache_key(ctrl_filename):
+    """Build consistent cache key from control filename.
+    
+    Format: tile_{x}_{y}_{hash}_{mask}_{variant}_template.png
+    -> tile_{x}_{y}_{hash}.txt (strip mask, variant, and _template)
+    """
+    name = ctrl_filename.rsplit('.', 1)[0]  # Remove extension
+    if name.endswith('_template'):
+        name = name[:-9]  # Remove _template (9 chars)
+    return name + '.txt'
+
+
 class CustomImageDataset(Dataset):
     """Dataset for isometric map infilling - pairs control (template) + target images."""
 
@@ -120,6 +132,11 @@ class CustomImageDataset(Dataset):
                 img_path = sample['target']
                 ctrl_path = sample['control']
 
+            # Build consistent cache key
+            ctrl_filename = ctrl_path.split('/')[-1]
+            cache_key = _build_cache_key(ctrl_filename)
+            empty_key = cache_key.replace('.txt', '_empty.pt')
+
             # Load target image
             if self.cached_image_embeddings is not None:
                 target_img = self.cached_image_embeddings.get(
@@ -138,41 +155,40 @@ class CustomImageDataset(Dataset):
             else:
                 control_img = self._load_image(ctrl_path)
 
-            # Load caption/prompt
-            # Use control filename as cache key (matches precompute iteration)
-            img_name_for_cache = ctrl_path.split('/')[-1].rsplit('.', 1)[0]
-            if img_name_for_cache.endswith('_template'):
-                img_name_for_cache = img_name_for_cache[:-9]
-            img_name_for_cache += '.txt'
-            empty_key = img_name_for_cache + '_empty.pt'
-
+            # Load caption/prompt embeddings
             if self.cached_text_embeddings is not None:
+                # In-memory cache
                 if empty_key in self.cached_text_embeddings and \
                    (np.random.random() < self.caption_dropout_rate):
                     emb = self.cached_text_embeddings[empty_key]
                     return target_img, emb['prompt_embeds'], emb['prompt_embeds_mask'], control_img
 
-                if img_name_for_cache in self.cached_text_embeddings:
-                    emb = self.cached_text_embeddings[img_name_for_cache]
+                if cache_key in self.cached_text_embeddings:
+                    emb = self.cached_text_embeddings[cache_key]
                     return target_img, emb['prompt_embeds'], emb['prompt_embeds_mask'], control_img
 
-                # Fallback: empty
-                return target_img, torch.zeros(1, 768), torch.zeros(1, dtype=torch.int32), control_img
-            elif hasattr(self, 'txt_cache_dir') and self.txt_cache_dir:
-                # Load from disk cache
-                import os
-                cache_path = os.path.join(self.txt_cache_dir, empty_key)
-                if os.path.exists(cache_path) and np.random.random() < self.caption_dropout_rate:
-                    emb = torch.load(cache_path, map_location='cpu')
+                # Key not found - return zeros (should not happen if precompute is correct)
+                print(f"[WARNING] Cache key not found: {cache_key}")
+                return target_img, torch.zeros(1, 4096), torch.zeros(1, dtype=torch.int32), control_img
+
+            elif self.txt_cache_dir:
+                # Disk cache
+                empty_cache_path = os.path.join(self.txt_cache_dir, empty_key)
+                if os.path.exists(empty_cache_path) and np.random.random() < self.caption_dropout_rate:
+                    emb = torch.load(empty_cache_path, map_location='cpu')
                     return target_img, emb['prompt_embeds'], emb['prompt_embeds_mask'], control_img
-                
-                cache_path = os.path.join(self.txt_cache_dir, img_name_for_cache + '.pt')
+
+                cache_path = os.path.join(self.txt_cache_dir, cache_key + '.pt')
                 if os.path.exists(cache_path):
                     emb = torch.load(cache_path, map_location='cpu')
                     return target_img, emb['prompt_embeds'], emb['prompt_embeds_mask'], control_img
-                
-                return target_img, torch.zeros(1, 768), torch.zeros(1, dtype=torch.int32), control_img
+
+                # Key not found - return zeros
+                print(f"[WARNING] Disk cache key not found: {cache_key}")
+                return target_img, torch.zeros(1, 4096), torch.zeros(1, dtype=torch.int32), control_img
             else:
+                # No caching - load text file directly
+                txt_path = os.path.join(self.img_dir, cache_key.replace('.txt', '.txt'))
                 try:
                     prompt = open(txt_path, encoding='utf-8').read()
                 except:
@@ -181,7 +197,46 @@ class CustomImageDataset(Dataset):
 
         except Exception as e:
             print(f"Error loading sample {idx}: {e}")
+            import traceback
+            traceback.print_exc()
             return self.__getitem__(np.random.randint(0, len(self)))
+
+
+def collate_fn(batch):
+    """Collate batch - handles both cached latents and raw images."""
+    if len(batch[0]) == 4:
+        # Cached mode: target_img, prompt_embeds, prompt_embeds_mask, control_img
+        target_img, prompt_embeds, prompt_embeds_mask, control_img = zip(*batch)
+        
+        # Stack images
+        target_img_stacked = torch.stack(target_img)
+        control_img_stacked = torch.stack(control_img)
+        
+        # Stack embeddings - handle variable sequence lengths
+        prompt_embeds_list = []
+        prompt_masks_list = []
+        for pe, pm in zip(prompt_embeds, prompt_embeds_mask):
+            if isinstance(pe, torch.Tensor):
+                prompt_embeds_list.append(pe)
+            else:
+                # String prompt - will be encoded on-the-fly (not supported with caching)
+                raise ValueError("String prompts not supported with cached embeddings")
+            prompt_masks_list.append(pm)
+        
+        return (
+            target_img_stacked,  # [B, C, H, W] or [B, 16, 128, 128]
+            torch.stack(prompt_embeds_list),
+            torch.stack(prompt_masks_list),
+            control_img_stacked,
+        )
+    else:
+        # Raw mode: target_img, prompt, control_img
+        target_img, prompts, control_img = zip(*batch)
+        return (
+            torch.stack([t if isinstance(t, torch.Tensor) else torch.from_numpy(np.array(t)) for t in target_img]),
+            list(prompts),
+            torch.stack([c if isinstance(c, torch.Tensor) else torch.from_numpy(np.array(c)) for c in control_img]),
+        )
 
 
 def loader(
@@ -211,26 +266,13 @@ def loader(
         txt_cache_dir=txt_cache_dir,
     )
 
-    def collate_fn(batch):
-        """Stack batch tensors. Dataset returns [C, H, W], collate to [B, C, H, W]."""
-        target_img, prompt_embeds, prompt_embeds_mask, control_img = zip(*batch)
-        
-        target_img_stacked = torch.stack(target_img)
-        control_img_stacked = torch.stack(control_img)
-        print(f"[DEBUG COLLECTE] target_img stacked: {target_img_stacked.shape}, control_img: {control_img_stacked.shape}")
-        
-        # Already [C, H, W] from dataset, stack to [B, C, H, W]
-        return (
-            target_img_stacked,  # [B, C, H, W]
-            torch.stack(prompt_embeds),  # [B, ...]
-            torch.stack(prompt_embeds_mask),  # [B, ...]
-            control_img_stacked,  # [B, C, H, W]
-        )
+    # Always use collate_fn when using any embedding cache
+    use_collate = cached_text_embeddings is not None or txt_cache_dir is not None
 
     return DataLoader(
         dataset,
         batch_size=train_batch_size,
         num_workers=num_workers,
-        shuffle=True if cached_text_embeddings is None else True,
-        collate_fn=collate_fn if cached_image_embeddings is not None else None,
+        shuffle=True if cached_text_embeddings is None and txt_cache_dir is None else True,
+        collate_fn=collate_fn if use_collate else None,
     )
