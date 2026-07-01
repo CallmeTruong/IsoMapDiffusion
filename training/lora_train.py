@@ -480,6 +480,7 @@ def main():
                     control_img = control_img.to(dtype=weight_dtype, device=accelerator.device)
                 else:
                     img, prompts, control_img = batch
+                    control_img = control_img.to(dtype=weight_dtype, device=accelerator.device)
                 
                 with torch.no_grad():
                     if not args.precompute_image_embeddings:
