@@ -172,13 +172,29 @@ def main():
                     continue
                 img_path = os.path.join(args.data_config.control_dir, img_name)
                 img_name_key = os.path.splitext(img_name)[0]
+                
+                # Cache key: strip _template suffix
                 if img_name_key.endswith('_template'):
-                    img_name_key = img_name_key[:-9]
-                txt_path = os.path.join(args.data_config.img_dir, img_name_key + '.txt')
+                    cache_key = img_name_key[:-9]  # tile_{x}_{y}_{hash}_{mask}_{variant}
+                else:
+                    cache_key = img_name_key
+                
+                # Build target name for prompt lookup
+                # Control: tile_{x}_{y}_{hash}_{mask}_{variant}_template.png
+                # Target:  tile_{x}_{y}_{hash}_target.png
+                if '_template' in img_name:
+                    parts = img_name_key.split('_')
+                    if len(parts) >= 4:
+                        target_key = '_'.join(parts[:4]) + '_target.txt'  # tile_{x}_{y}_{hash}_target.txt
+                    else:
+                        target_key = img_name_key + '_target.txt'
+                else:
+                    target_key = img_name_key + '_target.txt'
+                txt_path = os.path.join(args.data_config.img_dir, target_key)
                 
                 # Skip if already cached on disk
                 if args.save_cache_on_disk:
-                    cache_file = os.path.join(txt_cache_dir, img_name_key + '.txt.pt')
+                    cache_file = os.path.join(txt_cache_dir, cache_key + '.txt.pt')
                     if os.path.exists(cache_file):
                         continue
                 
@@ -191,7 +207,7 @@ def main():
                 prompt = open(txt_path, encoding='utf-8').read() if os.path.exists(txt_path) else ""
                 all_images.append(img)
                 all_prompts.append(prompt if prompt else " ")
-                all_keys.append(img_name_key)
+                all_keys.append(cache_key)
             
             # Process in batches
             for batch_start in tqdm(range(0, len(all_images), batch_size)):

@@ -77,18 +77,31 @@ class CustomImageDataset(Dataset):
     def _build_sample(self, ctrl_file: Path):
         """Build a sample dict by matching control to target."""
         ctrl_name = ctrl_file.stem
-        parts = ctrl_name.split('_')
-
+        
         # Format: tile_{x}_{y}_{hash}_{mask_type}_{variant}_template
-        # Need to extract: tile_{x}_{y}_{hash}_target
-        if len(parts) >= 6 and parts[-2] == 'template':
-            tile_prefix = '_'.join(parts[:4])  # tile_{x}_{y}_{hash}
-            target_name = f"{tile_prefix}_target.png"
-        elif len(parts) >= 4:
-            tile_prefix = '_'.join(parts[:3])  # tile_{x}_{y}
+        # Example: tile_+0_-34_4b43a01d_quadrant_br_00_template
+        # parts: ['tile', '+0', '-34', '4b43a01d', 'quadrant', 'br', '00', 'template']
+        # We need to extract: tile_{x}_{y}_{hash} (first 4 parts)
+        if ctrl_name.endswith('_template'):
+            # Remove _template suffix and extract tile hash (first 4 underscore-separated parts)
+            base_name = ctrl_name[:-9]  # Remove '_template' (9 chars)
+            parts = base_name.split('_')
+            # tile_{x}_{y}_{hash}_{mask_type}_{variant}
+            if len(parts) >= 4:
+                tile_prefix = '_'.join(parts[:4])  # tile_{x}_{y}_{hash}
+            else:
+                tile_prefix = base_name
             target_name = f"{tile_prefix}_target.png"
         else:
-            target_name = ctrl_file.name.replace('_template', '_target')
+            # Fallback: assume name contains tile info
+            parts = ctrl_name.split('_')
+            if len(parts) >= 4:
+                tile_prefix = '_'.join(parts[:4])
+            elif len(parts) >= 3:
+                tile_prefix = '_'.join(parts[:3])
+            else:
+                tile_prefix = ctrl_name
+            target_name = f"{tile_prefix}_target.png"
 
         target_path = self.img_dir / target_name if self.img_dir else None
 
