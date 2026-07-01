@@ -140,7 +140,10 @@ class CustomImageDataset(Dataset):
 
             # Load caption/prompt
             # Use control filename as cache key (matches precompute iteration)
-            img_name_for_cache = ctrl_path.split('/')[-1].rsplit('.', 1)[0] + '.txt'
+            img_name_for_cache = ctrl_path.split('/')[-1].rsplit('.', 1)[0]
+            if img_name_for_cache.endswith('_template'):
+                img_name_for_cache = img_name_for_cache[:-9]
+            img_name_for_cache += '.txt'
             empty_key = img_name_for_cache + '_empty.pt'
 
             if self.cached_text_embeddings is not None:
