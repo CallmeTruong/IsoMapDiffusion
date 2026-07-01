@@ -27,6 +27,10 @@ def image_resize(img, max_size=512):
     return img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
 
+# Backward compatibility alias
+CustomImageDataset = None  # Will be set after CSVDataset is defined
+
+
 class CSVDataset(Dataset):
     """Dataset that loads from CSV index file."""
 
@@ -254,3 +258,7 @@ def loader(
         shuffle=True,
         collate_fn=collate_fn if use_collate else None,
     )
+
+
+# Backward compatibility alias
+CustomImageDataset = CSVDataset
