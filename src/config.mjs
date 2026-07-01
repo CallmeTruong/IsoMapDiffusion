@@ -47,7 +47,7 @@ const DEFAULTS = {
     stableHits:       5,
     varianceThr:      250,
 
-    // Blank/blurry thresholds (cho analyzeCanvas)
+    // Blank/blurry thresholds (for analyzeCanvas)
     blankVarianceThr: 800,
     blankEdgeThr:     0.15,
     blankMeanThr:     [60, 110],
@@ -76,7 +76,7 @@ const DEFAULTS = {
     sessionMaxMs:       10 * 60 * 1000,  // min per worker session
     maxRetry:           2,
 
-    // Sample grid cho analyzeCanvas (WebGL readPixels)
+    // Sample grid for analyzeCanvas (WebGL readPixels)
     sampleGridSize:     20,     // 20×20 = 400 samples
     edgeGradThr:        30,     // gradient threshold per channel (0-255)
 
