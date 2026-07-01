@@ -232,33 +232,42 @@ def main():
                     with open(txt_path, 'r', encoding='utf-8') as f:
                         prompt = f.read().strip()
                     
+
                     txt_name = img_name.split('.')[0] + '.txt'
                     
                     # Encode with prompt
-                    prompt_embeds, prompt_embeds_mask = text_encoding_pipeline.encode_prompt(
+                    result = text_encoding_pipeline.encode_prompt(
                         image=prompt_image,
                         prompt=[prompt],
                         device=text_encoding_pipeline.device,
                         num_images_per_prompt=1,
                         max_sequence_length=1024,
                     )
+                    
+                    if result is None:
+                        logger.warning(f"encode_prompt returned None for {txt_path}, skipping")
+                        continue
+                    
+                    prompt_embeds, prompt_embeds_mask = result
                     cached_text_embeddings[txt_name] = {
                         'prompt_embeds': prompt_embeds[0].cpu(),
                         'prompt_embeds_mask': prompt_embeds_mask[0].cpu(),
                     }
                     
                     # Empty embedding
-                    embeds_empty, mask_empty = text_encoding_pipeline.encode_prompt(
+                    result_empty = text_encoding_pipeline.encode_prompt(
                         image=prompt_image,
                         prompt=[' '],
                         device=text_encoding_pipeline.device,
                         num_images_per_prompt=1,
                         max_sequence_length=1024,
                     )
-                    cached_text_embeddings[f"{txt_name}empty_embedding"] = {
-                        'prompt_embeds': embeds_empty[0].cpu(),
-                        'prompt_embeds_mask': mask_empty[0].cpu(),
-                    }
+                    if result_empty is not None:
+                        embeds_empty, mask_empty = result_empty
+                        cached_text_embeddings[f"{txt_name}empty_embedding"] = {
+                            'prompt_embeds': embeds_empty[0].cpu(),
+                            'prompt_embeds_mask': mask_empty[0].cpu(),
+                        }
     
     # ============== VAE LATENTS (BATCHED) ==============
     vae = AutoencoderKLQwenImage.from_pretrained(
