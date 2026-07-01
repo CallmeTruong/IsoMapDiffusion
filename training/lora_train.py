@@ -167,6 +167,10 @@ def main():
             all_prompts = []
             all_keys = []
             
+            # prompts_dir: look for prompts here
+            prompts_dir = os.path.join(os.path.dirname(args.data_config.img_dir), 'prompts')
+            os.makedirs(prompts_dir, exist_ok=True)
+            
             for img_name in os.listdir(args.data_config.control_dir):
                 if not img_name.endswith(('.png', '.jpg')):
                     continue
@@ -179,18 +183,29 @@ def main():
                 else:
                     cache_key = img_name_key
                 
-                # Build target name for prompt lookup
+                # Build tile prefix for prompt lookup
                 # Control: tile_{x}_{y}_{hash}_{mask}_{variant}_template.png
-                # Target:  tile_{x}_{y}_{hash}_target.png
+                # Prompt:  tile_{x}_{y}_{hash}.txt
                 if '_template' in img_name:
                     parts = img_name_key.split('_')
                     if len(parts) >= 4:
-                        target_key = '_'.join(parts[:4]) + '_target.txt'  # tile_{x}_{y}_{hash}_target.txt
+                        tile_prefix = '_'.join(parts[:4])  # tile_{x}_{y}_{hash}
                     else:
-                        target_key = img_name_key + '_target.txt'
+                        tile_prefix = img_name_key
                 else:
-                    target_key = img_name_key + '_target.txt'
-                txt_path = os.path.join(args.data_config.img_dir, target_key)
+                    tile_prefix = cache_key
+                
+                # Try prompts_dir first, then fall back to img_dir
+                txt_path = None
+                if os.path.exists(prompts_dir):
+                    candidate = os.path.join(prompts_dir, tile_prefix + '.txt')
+                    if os.path.exists(candidate):
+                        txt_path = candidate
+                
+                if txt_path is None:
+                    candidate = os.path.join(args.data_config.img_dir, tile_prefix + '.txt')
+                    if os.path.exists(candidate):
+                        txt_path = candidate
                 
                 # Skip if already cached on disk
                 if args.save_cache_on_disk:
@@ -204,7 +219,7 @@ def main():
                 img = img.crop(((w - min_dim) // 2, (h - min_dim) // 2, (w + min_dim) // 2, (h + min_dim) // 2))
                 img = img.resize((args.data_config.img_size, args.data_config.img_size), Image.Resampling.LANCZOS)
                 
-                prompt = open(txt_path, encoding='utf-8').read() if os.path.exists(txt_path) else ""
+                prompt = open(txt_path, encoding='utf-8').read() if txt_path else ""
                 all_images.append(img)
                 all_prompts.append(prompt if prompt else " ")
                 all_keys.append(cache_key)
@@ -445,11 +460,15 @@ def main():
             eps=args.adam_epsilon,
         )
 
+    # prompts_dir for loading prompts
+    prompts_dir = os.path.join(os.path.dirname(args.data_config.img_dir), 'prompts')
+    
     train_dataloader = loader(
         cached_text_embeddings=cached_text_embeddings,
         cached_image_embeddings=cached_image_embeddings,
         cached_image_embeddings_control=cached_image_embeddings_control,
         txt_cache_dir=txt_cache_dir if args.save_cache_on_disk else None,
+        prompts_dir=prompts_dir if os.path.exists(prompts_dir) else None,
         **args.data_config
     )
 
