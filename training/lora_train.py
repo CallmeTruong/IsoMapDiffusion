@@ -124,7 +124,7 @@ def main():
     config_path = parse_args()
     args = OmegaConf.load(config_path)
     args.save_cache_on_disk = False
-    args.precompute_text_embeddings = True
+    args.precompute_text_embeddings = False
     args.precompute_image_embeddings = True
 
     # Resolve paths relative to config file location
@@ -467,7 +467,7 @@ def main():
                     prompt_embeds_mask = prompt_embeds_mask.to(dtype=torch.int32, device=accelerator.device)
                     control_img = control_img.to(dtype=weight_dtype, device=accelerator.device)
                 else:
-                    img, prompts = batch
+                    img, prompts, control_img = batch
                 
                 with torch.no_grad():
                     if not args.precompute_image_embeddings:

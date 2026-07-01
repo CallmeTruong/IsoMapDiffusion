@@ -42,7 +42,7 @@ gradient_accumulation_steps: 1
 rank: 16
 
 # Precompute settings
-precompute_text_embeddings: true
+precompute_text_embeddings: false
 precompute_image_embeddings: true
 save_cache_on_disk: false
 
