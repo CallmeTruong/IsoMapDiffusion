@@ -1,19 +1,42 @@
 """
-CSV-based dataset loader for LoRA training.
-Uses dataset.csv as single source of truth.
+ControlNet Dataset for training with control images.
+
+NEW STRUCTURE (v2.0):
+    dataset/
+        images/
+            image_001.jpg   (target image - pixel art)
+            image_001.txt   (caption for target)
+            image_002.jpg
+            image_002.txt
+            ...
+        control/
+            image_001.jpg   (control image - template with red border)
+            image_002.jpg
+            ...
+        prompts/
+            prompt.txt         (COMMON prompt - used by all)
+        dataset_mapping.csv
+        dataset_metadata.json
 """
 
 import os
-import pandas as pd
-import numpy as np
-from PIL import Image
-import torch
-from torch.utils.data import Dataset, DataLoader
-from pathlib import Path
 import random
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+from PIL import Image
+from torch.utils.data import Dataset, DataLoader
+
+
+def throw_one(probability: float) -> int:
+    """Return 1 with given probability, else 0."""
+    return 1 if random.random() < probability else 0
 
 
 def image_resize(img, max_size=512):
+    """Resize image maintaining aspect ratio."""
     w, h = img.size
     if w >= h:
         new_w = max_size
@@ -21,244 +44,211 @@ def image_resize(img, max_size=512):
     else:
         new_h = max_size
         new_w = int((max_size / h) * w)
-    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    new_w = (new_w // 32) * 32
-    new_h = (new_h // 32) * 32
-    return img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    return img.resize((new_w, new_h))
 
 
-# Backward compatibility alias
-CustomImageDataset = None  # Will be set after CSVDataset is defined
+def c_crop(image):
+    """Center crop to square."""
+    width, height = image.size
+    new_size = min(width, height)
+    left = (width - new_size) / 2
+    top = (height - new_size) / 2
+    right = (width + new_size) / 2
+    bottom = (height + new_size) / 2
+    return image.crop((left, top, right, bottom))
 
 
-class CSVDataset(Dataset):
-    """Dataset that loads from CSV index file."""
+def crop_to_aspect_ratio(image, ratio="16:9"):
+    """Crop image to target aspect ratio."""
+    width, height = image.size
+    ratio_map = {
+        "16:9": (16, 9),
+        "4:3": (4, 3),
+        "1:1": (1, 1)
+    }
+    target_w, target_h = ratio_map[ratio]
+    target_ratio_value = target_w / target_h
+
+    current_ratio = width / height
+
+    if current_ratio > target_ratio_value:
+        new_width = int(height * target_ratio_value)
+        offset = (width - new_width) // 2
+        crop_box = (offset, 0, offset + new_width, height)
+    else:
+        new_height = int(width / target_ratio_value)
+        offset = (height - new_height) // 2
+        crop_box = (0, offset, width, offset + new_height)
+
+    return image.crop(crop_box)
+
+
+def normalize_image(img):
+    """Convert PIL image to normalized tensor."""
+    img_array = np.array(img)
+    img_tensor = torch.from_numpy((img_array / 127.5) - 1)
+    img_tensor = img_tensor.permute(2, 0, 1)
+    return img_tensor
+
+
+def resize_to_multiple_of_32(img, max_size=512):
+    """Resize image and ensure dimensions are multiples of 32."""
+    img = image_resize(img, max_size)
+    w, h = img.size
+    new_w = (w // 32) * 32
+    new_h = (h // 32) * 32
+    img = img.resize((new_w, new_h))
+    return img
+
+
+class ControlDataset(Dataset):
+    """
+    Dataset for training with control images.
+
+    Expected structure:
+        img_dir/           - contains .jpg files (targets)
+        control_dir/       - contains .jpg files (controls)
+        prompts_dir/       - contains prompt.txt (common prompt)
+
+    Also supports reading from dataset_mapping.csv for explicit mapping.
+    """
 
     def __init__(
         self,
-        csv_path,
-        dataset_dir,
-        img_size=1024,
-        random_ratio=False,
-        caption_dropout_rate=0.1,
-        cached_text_embeddings=None,
-        cached_image_embeddings=None,
-        cached_control_embeddings=None,
-        txt_cache_dir=None,
+        img_dir: str,
+        img_size: int = 512,
+        caption_type: str = 'txt',
+        random_ratio: bool = False,
+        caption_dropout_rate: float = 0.1,
+        cached_text_embeddings: dict = None,
+        cached_image_embeddings: dict = None,
+        control_dir: str = None,
+        cached_image_embeddings_control: dict = None,
+        prompts_dir: str = None,
+        use_common_prompt: bool = True,
     ):
-        self.csv_path = Path(csv_path)
-        self.dataset_dir = Path(dataset_dir)
+        self.img_dir = Path(img_dir)
+        self.control_dir = Path(control_dir) if control_dir else None
+        self.prompts_dir = Path(prompts_dir) if prompts_dir else self.img_dir.parent / 'prompts'
         self.img_size = img_size
+        self.caption_type = caption_type
         self.random_ratio = random_ratio
         self.caption_dropout_rate = caption_dropout_rate
         self.cached_text_embeddings = cached_text_embeddings
         self.cached_image_embeddings = cached_image_embeddings
-        self.cached_control_embeddings = cached_control_embeddings
-        self.txt_cache_dir = txt_cache_dir
+        self.cached_control_image_embeddings = cached_image_embeddings_control
+        self.use_common_prompt = use_common_prompt
 
-        # Load CSV
-        self.df = pd.read_csv(self.csv_path)
-        print(f"Loaded {len(self.df)} samples from {self.csv_path}")
+        # Load images (only .jpg files from img_dir)
+        self.images = sorted([
+            f for f in os.listdir(self.img_dir)
+            if f.endswith('.jpg') or f.endswith('.png')
+        ])
 
-    def _to_tensor(self, img: Image.Image) -> torch.Tensor:
-        arr = np.array(img).astype(np.float32) / 127.5 - 1.0
-        return torch.from_numpy(arr).permute(2, 0, 1)
+        # Load common prompt if exists
+        self.common_prompt = ""
+        common_prompt_path = self.prompts_dir / 'prompt.txt'
+        if common_prompt_path.exists():
+            with open(common_prompt_path, 'r', encoding='utf-8') as f:
+                self.common_prompt = f.read().strip()
 
-    def _load_image(self, rel_path: str) -> torch.Tensor:
-        img_path = self.dataset_dir / rel_path
-        img = Image.open(img_path).convert('RGB')
-        if self.random_ratio:
-            w, h = img.size
-            min_dim = min(w, h)
-            img = img.crop(((w - min_dim) // 2, (h - min_dim) // 2, (w + min_dim) // 2, (h + min_dim) // 2))
-        img = img.resize((self.img_size, self.img_size), Image.Resampling.LANCZOS)
-        return self._to_tensor(img)
+        print(f"[ControlDataset] Found {len(self.images)} images")
+        print(f"[ControlDataset] img_dir: {self.img_dir}")
+        print(f"[ControlDataset] control_dir: {self.control_dir}")
+        print(f"[ControlDataset] prompts_dir: {self.prompts_dir}")
+        if self.common_prompt:
+            print(f"[ControlDataset] Common prompt loaded ({len(self.common_prompt)} chars)")
+        else:
+            print("[ControlDataset] WARNING: No common prompt found!")
 
     def __len__(self):
-        return len(self.df)
+        return len(self.images)
+
+    def _load_and_process_image(self, img_path: Image.Image) -> torch.Tensor:
+        """Load and process an image to tensor."""
+        if self.random_ratio:
+            ratio = random.choice(["16:9", "default", "1:1", "4:3"])
+            if ratio != "default":
+                img_path = crop_to_aspect_ratio(img_path, ratio)
+
+        img_path = resize_to_multiple_of_32(img_path, self.img_size)
+        return normalize_image(img_path)
+
+    def _get_caption(self, img_name: str) -> str:
+        """Get caption for the image."""
+        if self.cached_text_embeddings is not None:
+            # Return empty string when using cached embeddings
+            return ""
+
+        caption_name = img_name.rsplit('.', 1)[0] + '.' + self.caption_type
+        caption_path = self.img_dir / caption_name
+
+        if caption_path.exists():
+            with open(caption_path, 'r', encoding='utf-8') as f:
+                return f.read().strip()
+        else:
+            # Fallback to common prompt
+            return self.common_prompt
+
+    def _get_control_image_path(self, img_name: str) -> str:
+        """Get the control image path for this target image."""
+        if self.control_dir is None:
+            return None
+
+        # Control images have same name as target images
+        return str(self.control_dir / img_name)
 
     def __getitem__(self, idx):
         try:
-            row = self.df.iloc[idx]
-
-            # Get paths
-            target_rel = row['target_image']  # e.g., "targets/tile_..._target.png"
-            template_rel = row['template_image']  # e.g., "templates/tile_..._template.png"
-            sample_id = row['sample_id']
+            img_name = self.images[idx]
 
             # Load target image
-            if self.cached_image_embeddings is not None:
-                target_img = self.cached_image_embeddings.get(
-                    target_rel,
-                    torch.zeros(16, 128, 128)
-                )
+            if self.cached_image_embeddings is None:
+                img_path = self.img_dir / img_name
+                img = Image.open(img_path).convert('RGB')
+                target_tensor = self._load_and_process_image(img)
             else:
-                target_img = self._load_image(target_rel)
+                target_tensor = self.cached_image_embeddings[img_name]
 
-            # Load control (template) image
-            if self.cached_control_embeddings is not None:
-                control_img = self.cached_control_embeddings.get(
-                    template_rel,
-                    torch.zeros(16, 128, 128)
-                )
-            else:
-                control_img = self._load_image(template_rel)
-
-            # Load prompt embeddings
-            if self.cached_text_embeddings is not None:
-                # Check for caption dropout
-                empty_key = sample_id + '_empty'
-                use_empty = random.random() < self.caption_dropout_rate
-
-                if use_empty and empty_key in self.cached_text_embeddings:
-                    emb = self.cached_text_embeddings[empty_key]
-                    pem = emb.get('prompt_embeds')
-                    pem_mask = emb.get('prompt_embeds_mask')
-                    # Handle None mask
-                    if pem_mask is None:
-                        pem_mask = torch.ones(pem.shape[:2], dtype=torch.int32)
-                    return target_img, pem, pem_mask, control_img
-
-                if sample_id in self.cached_text_embeddings:
-                    emb = self.cached_text_embeddings[sample_id]
-                    pem = emb.get('prompt_embeds')
-                    pem_mask = emb.get('prompt_embeds_mask')
-                    if pem_mask is None:
-                        pem_mask = torch.ones(pem.shape[:2], dtype=torch.int32)
-                    return target_img, pem, pem_mask, control_img
-
-                print(f"[WARNING] Cache key not found: {sample_id}")
-                return target_img, torch.zeros(1, 4096), torch.ones(1, dtype=torch.int32), control_img
-
-            elif self.txt_cache_dir:
-                empty_cache_path = os.path.join(self.txt_cache_dir, sample_id + '_empty.pt')
-                use_empty = random.random() < self.caption_dropout_rate
-
-                if use_empty and os.path.exists(empty_cache_path):
-                    emb = torch.load(empty_cache_path, map_location='cpu')
-                    pem = emb.get('prompt_embeds')
-                    pem_mask = emb.get('prompt_embeds_mask')
-                    if pem_mask is None:
-                        pem_mask = torch.ones(pem.shape[:2], dtype=torch.int32)
-                    return target_img, pem, pem_mask, control_img
-
-                cache_path = os.path.join(self.txt_cache_dir, sample_id + '.txt.pt')
-                if os.path.exists(cache_path):
-                    emb = torch.load(cache_path, map_location='cpu')
-                    pem = emb.get('prompt_embeds')
-                    pem_mask = emb.get('prompt_embeds_mask')
-                    if pem_mask is None:
-                        pem_mask = torch.ones(pem.shape[:2], dtype=torch.int32)
-                    return target_img, pem, pem_mask, control_img
-
-                print(f"[WARNING] Disk cache not found: {sample_id}")
-                return target_img, torch.zeros(1, 4096), torch.ones(1, dtype=torch.int32), control_img
-            else:
-                # Load prompt from txt file (not cached)
-                prompt_path_rel = row.get('prompt_path', '')
-                prompt_full_path = self.dataset_dir / prompt_path_rel
-
-                if prompt_full_path.exists():
-                    prompt = prompt_full_path.read_text(encoding='utf-8')
+            # Load control image
+            if self.cached_control_image_embeddings is None:
+                control_path = self._get_control_image_path(img_name)
+                if control_path and os.path.exists(control_path):
+                    control_img = Image.open(control_path).convert('RGB')
+                    control_tensor = self._load_and_process_image(control_img)
                 else:
-                    prompt = "isometric pixel art tile"
+                    # Fallback: use target as control
+                    control_tensor = target_tensor
+            else:
+                control_tensor = self.cached_control_image_embeddings[img_name]
 
-                # Caption dropout
-                if random.random() < self.caption_dropout_rate:
-                    prompt = " "
+            # Get caption/prompt
+            caption = self._get_caption(img_name)
 
-                return target_img, prompt, control_img
+            # Apply caption dropout
+            if self.caption_dropout_rate > 0 and throw_one(self.caption_dropout_rate):
+                caption = " "  # Empty prompt for dropout
+
+            return target_tensor, caption, control_tensor
 
         except Exception as e:
-            print(f"Error loading sample {idx}: {e}")
-            import traceback
-            traceback.print_exc()
-            return self.__getitem__(random.randint(0, len(self) - 1))
+            print(f"Error loading {self.images[idx]}: {e}")
+            # Return random sample on error
+            new_idx = random.randint(0, len(self.images) - 1)
+            return self.__getitem__(new_idx)
 
 
-def collate_fn(batch):
-    """Collate batch - handles both cached latents and raw images."""
-    if len(batch[0]) == 4:
-        # Cached mode: target_img, prompt_embeds, prompt_embeds_mask, control_img
-        target_img, prompt_embeds, prompt_embeds_mask, control_img = zip(*batch)
-
-        return (
-            torch.stack(target_img),
-            torch.stack(prompt_embeds),
-            torch.stack(prompt_embeds_mask),
-            torch.stack(control_img),
-        )
-    else:
-        # Raw mode: target_img, prompt, control_img
-        target_img, prompts, control_img = zip(*batch)
-        return (
-            torch.stack(target_img),
-            list(prompts),
-            torch.stack(control_img),
-        )
-
-
-def loader(
-    csv_path=None,
-    dataset_dir=None,
-    cached_text_embeddings=None,
-    cached_image_embeddings=None,
-    cached_image_embeddings_control=None,
-    train_batch_size=1,
-    num_workers=4,
-    img_size=1024,
-    txt_cache_dir=None,
-    caption_dropout_rate=0.1,
-    random_ratio=False,
-    **kwargs,
-):
-    """
-    Create DataLoader from CSV index.
-
-    Args:
-        csv_path: Path to dataset.csv (e.g., "lora_dataset/dataset.csv")
-        dataset_dir: Root directory containing targets/, templates/, prompts/ subdirs
-        cached_text_embeddings: Precomputed text embeddings dict
-        cached_image_embeddings: Precomputed target image embeddings dict
-        cached_image_embeddings_control: Precomputed template image embeddings dict
-        train_batch_size: Batch size
-        num_workers: Number of workers for DataLoader
-        img_size: Image size for loading
-        txt_cache_dir: Directory for text embedding cache
-        caption_dropout_rate: Rate for caption dropout
-        random_ratio: Whether to randomly crop to different aspect ratios
-    """
-    # Default paths if not provided
-    if csv_path is None and dataset_dir is not None:
-        csv_path = os.path.join(dataset_dir, 'dataset.csv')
-    if dataset_dir is None and csv_path is not None:
-        dataset_dir = os.path.dirname(csv_path)
-
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"CSV not found: {csv_path}")
-
-    dataset = CSVDataset(
-        csv_path=csv_path,
-        dataset_dir=dataset_dir,
-        img_size=img_size,
-        random_ratio=random_ratio,
-        caption_dropout_rate=caption_dropout_rate,
-        cached_text_embeddings=cached_text_embeddings,
-        cached_image_embeddings=cached_image_embeddings,
-        cached_control_embeddings=cached_image_embeddings_control,
-        txt_cache_dir=txt_cache_dir,
-    )
-
-    use_collate = cached_text_embeddings is not None or txt_cache_dir is not None
-
+def loader(train_batch_size, num_workers, **kwargs):
+    """Create a DataLoader from ControlDataset."""
+    dataset = ControlDataset(**kwargs)
     return DataLoader(
         dataset,
         batch_size=train_batch_size,
         num_workers=num_workers,
         shuffle=True,
-        collate_fn=collate_fn if use_collate else None,
+        pin_memory=True,
     )
 
 
 # Backward compatibility alias
-CustomImageDataset = CSVDataset
+CustomImageDataset = ControlDataset

@@ -1,58 +1,55 @@
-# LoRA Training Configuration for Isometric Map Infilling
+# Training configuration for LoRA training with Qwen Image Edit model
+# Dataset structure (v2.0):
+#   ../dataset/
+#       images/         <- img_dir
+#       control/        <- control_dir
+#       prompts/        <- prompts_dir (optional)
 
-# Model
 pretrained_model_name_or_path: Qwen/Qwen-Image-Edit
 
-# Dataset - paths relative to project root
 data_config:
   train_batch_size: 1
   num_workers: 4
   img_size: 1024
   caption_dropout_rate: 0.1
-  img_dir: lora_dataset/targets
-  control_dir: lora_dataset/templates
-  caption_dir: null
+  img_dir: ../dataset/images                    # Target images (pixel art)
+  control_dir: ../dataset/control               # Control images (templates with red border)
+  prompts_dir: ../dataset/prompts              # Optional: prompts directory
   random_ratio: false
   caption_type: txt
+  use_common_prompt: true
 
-# Output
-output_dir: training/output/lora_saves
-logging_dir: logs
+report_to: null
 
-# Training params
+train_batch_size: 1
+output_dir: ../output/lora_saves_edit
 max_train_steps: 5000
 learning_rate: 2e-4
 lr_scheduler: constant
 lr_warmup_steps: 10
-gradient_accumulation_steps: 1
-max_grad_norm: 1.0
-
-# Optimizer
 adam_beta1: 0.9
 adam_beta2: 0.999
 adam_weight_decay: 0.01
 adam_epsilon: 1e-8
-adam8bit: false
-
-# LoRA
+max_grad_norm: 1.0
+logging_dir: logs
+mixed_precision: "bf16"
+checkpointing_steps: 250
+checkpoints_total_limit: 10
+tracker_project_name: lora_test
+resume_from_checkpoint: null
+gradient_accumulation_steps: 1
 rank: 16
 
-# Performance
-mixed_precision: "bf16"
-
-# Checkpointing
-checkpointing_steps: 250
-checkpoints_total_limit: 5
-resume_from_checkpoint: null
-
-# Tracking
-report_to: null
-tracker_project_name: isometric-lora
-
-# Caching - precompute embeddings for faster training
+# Precompute settings
 precompute_text_embeddings: true
 precompute_image_embeddings: true
-save_cache_on_disk: true
+save_cache_on_disk: false
 
-# Quantization (optional, for lower memory)
+# Batch sizes for precomputing (higher = faster but more VRAM)
+precompute_batch_size: 4      # Text embedding batch size
+latent_batch_size: 4          # VAE latent batch size
+
+# Quantization settings
 quantize: false
+adam8bit: false
