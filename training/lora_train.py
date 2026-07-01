@@ -244,8 +244,8 @@ def main():
                         max_sequence_length=1024,
                     )
                     
-                    if result is None:
-                        logger.warning(f"encode_prompt returned None for {txt_path}, skipping")
+                    if result is None or result[0] is None or result[1] is None:
+                        logger.warning(f"encode_prompt returned None/invalid for {txt_path}, skipping")
                         continue
                     
                     prompt_embeds, prompt_embeds_mask = result
@@ -262,7 +262,7 @@ def main():
                         num_images_per_prompt=1,
                         max_sequence_length=1024,
                     )
-                    if result_empty is not None:
+                    if result_empty is not None and result_empty[0] is not None and result_empty[1] is not None:
                         embeds_empty, mask_empty = result_empty
                         cached_text_embeddings[f"{txt_name}empty_embedding"] = {
                             'prompt_embeds': embeds_empty[0].cpu(),
