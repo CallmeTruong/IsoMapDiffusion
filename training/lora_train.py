@@ -464,12 +464,17 @@ def main():
     prompts_dir = os.path.join(os.path.dirname(args.data_config.img_dir), 'prompts')
     
     train_dataloader = loader(
+        csv_path=csv_path,
+        dataset_dir=os.path.dirname(csv_path),
         cached_text_embeddings=cached_text_embeddings,
         cached_image_embeddings=cached_image_embeddings,
         cached_image_embeddings_control=cached_image_embeddings_control,
         txt_cache_dir=txt_cache_dir if args.save_cache_on_disk else None,
-        prompts_dir=prompts_dir if os.path.exists(prompts_dir) else None,
-        **args.data_config
+        train_batch_size=args.data_config.train_batch_size,
+        num_workers=args.data_config.num_workers,
+        img_size=args.data_config.img_size,
+        caption_dropout_rate=args.data_config.caption_dropout_rate,
+        random_ratio=args.data_config.random_ratio,
     )
 
     lr_scheduler = get_scheduler(
