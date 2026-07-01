@@ -468,6 +468,10 @@ def main():
     
     vae_scale_factor = 2 ** len(vae.temperal_downsample)
     
+    # Move text encoding pipeline to GPU for training
+    if not args.precompute_text_embeddings:
+        text_encoding_pipeline.to(accelerator.device)
+    
     for epoch in range(1):
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
