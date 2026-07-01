@@ -207,7 +207,7 @@ def main():
         if accelerator.is_main_process:
             cache_dir = os.path.join(args.output_dir, "cache")
             os.makedirs(cache_dir, exist_ok=True)
-        accelerator.wait_for_everything()
+        accelerator.wait_for_everyone()
         cache_dir = os.path.join(args.output_dir, "cache")
     
     # ============== TEXT EMBEDDINGS (BATCHED) ==============
