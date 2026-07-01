@@ -345,7 +345,6 @@ def main():
         text_encoding_pipeline.to("cpu")
         torch.cuda.empty_cache()
     
-    del text_encoding_pipeline
     gc.collect()
     
     # ============== TRANSFORMER & TRAINING ==============
