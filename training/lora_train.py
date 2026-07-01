@@ -543,13 +543,17 @@ def main():
                 
                 with torch.no_grad():
                     if not args.precompute_text_embeddings:
-                        prompt_embeds, prompt_embeds_mask = text_encoding_pipeline.encode_prompt(
+                        result = text_encoding_pipeline.encode_prompt(
                             prompt=prompts,
                             device=packed_noisy_model_input.device,
                             num_images_per_prompt=1,
                             max_sequence_length=1024,
                         )
-                    txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist()
+                        if result is None or len(result) < 2:
+                            logger.warning(f"encode_prompt returned invalid result: {result}")
+                            continue
+                        prompt_embeds, prompt_embeds_mask = result
+                    txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist() if prompt_embeds_mask is not None else None
                 
                 model_pred = flux_transformer(
                     hidden_states=packed_noisy_model_input_concated,
