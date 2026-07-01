@@ -37,7 +37,7 @@ mixed_precision: "bf16"
 checkpointing_steps: 250
 checkpoints_total_limit: 10
 tracker_project_name: lora_test
-resume_from_checkpoint: null
+resume_from_checkpoint: true
 gradient_accumulation_steps: 1
 rank: 16
 
