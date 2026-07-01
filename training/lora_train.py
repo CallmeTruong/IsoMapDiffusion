@@ -224,18 +224,28 @@ def main():
             with torch.no_grad():
                 for img_name in batch_names:
                     img_path = os.path.join(args.data_config.control_dir, img_name)
-                    txt_path = os.path.join(args.data_config.img_dir, img_name.split('.')[0] + '.txt')
-
+                    txt_name = img_name.split('.')[0] + '.txt'
+                    txt_path = os.path.join(args.data_config.prompts_dir, txt_name)
+                    
+                    print(f"[DEBUG] Looking for prompt: {txt_path}")
+                    
+                    if not os.path.exists(txt_path):
+                        logger.warning(f"Prompt file not found: {txt_path}")
+                        continue
+                    
                     img = Image.open(img_path).convert('RGB')
                     prompt_image = preprocess_image(img, text_encoding_pipeline)
                     
                     with open(txt_path, 'r', encoding='utf-8') as f:
                         prompt = f.read().strip()
                     
+                    print(f"[DEBUG] Loaded prompt ({len(prompt)} chars): {prompt[:50]}...")
+                    
 
                     txt_name = img_name.split('.')[0] + '.txt'
                     
                     # Encode with prompt
+                    print(f"[DEBUG] Encoding prompt for {txt_name}...")
                     result = text_encoding_pipeline.encode_prompt(
                         image=prompt_image,
                         prompt=[prompt],
@@ -243,6 +253,8 @@ def main():
                         num_images_per_prompt=1,
                         max_sequence_length=1024,
                     )
+                    
+                    print(f"[DEBUG] encode_prompt result type: {type(result)}, is None: {result is None}")
                     
                     if result is None or result[0] is None or result[1] is None:
                         logger.warning(f"encode_prompt returned None/invalid for {txt_path}, skipping")
