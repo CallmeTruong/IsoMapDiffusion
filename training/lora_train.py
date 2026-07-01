@@ -5,9 +5,13 @@ import logging
 import math
 import os
 import shutil
+import sys
 from copy import deepcopy
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 import torch
@@ -41,7 +45,10 @@ import transformers
 from optimum.quanto import quantize, qfloat8, freeze
 import bitsandbytes as bnb
 
-from training.control_dataset import loader, image_resize
+try:
+    from training.control_dataset import loader, image_resize
+except ModuleNotFoundError:
+    from control_dataset import loader, image_resize
 
 logger = get_logger(__name__, log_level="INFO")
 
