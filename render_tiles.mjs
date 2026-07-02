@@ -320,7 +320,13 @@ if (totalFail > 0) console.log('\n' + totalFail + ' tiles failed — check rende
 
 // ─── Auto-retry missing/failed tiles ─────────────────────────────────────────
 
-async function retryMissingTiles(tiles, outputDir, seedLat, seedLng, cfg, blankSizeKb) {
+const RETRY_ATTEMPTS   = 2;
+const RETRY_TIMEOUT_MS = 45000;
+const RETRY_SESSION_MS = 120000;
+const RETRY_BACKOFF_MS = 500;
+const RETRY_MAX_ROUNDS = 3;
+
+function findMissingTiles(tiles, outputDir, blankSizeKb) {
   const missingTiles = [];
 
   for (const tile of tiles) {
@@ -343,22 +349,28 @@ async function retryMissingTiles(tiles, outputDir, seedLat, seedLng, cfg, blankS
     }
   }
 
-  if (missingTiles.length === 0) {
-    console.log('\n[retry] All tiles rendered successfully');
-    return;
-  }
+  return missingTiles;
+}
 
-  console.log(`\n[retry] Found ${missingTiles.length} missing/invalid tiles, retrying...`);
-
-  const CONCURRENCY = Math.min(NUM_WORKERS, 4);
+async function retryMissingTiles(tiles, outputDir, seedLat, seedLng, cfg, blankSizeKb) {
+  const CONCURRENCY = Math.min(Math.max(NUM_WORKERS, 1), 8);
   const retryCfg = { ...cfg, tileWaitMs: (cfg.tileWaitMs ?? 12000) + 3000 };
-  let successCount = 0;
-  let failCount = 0;
+
+  async function tryFallback2D(tile) {
+    if (!RENDER_CFG.fallback?.enabled) return false;
+    try {
+      const { renderFallback2D } = await import('./src/tile/fallback_2d.mjs');
+      const r = await renderFallback2D(tile, seedLng, seedLat, RENDER_CFG, outputDir, null, 99);
+      return !!r.ok;
+    } catch {
+      return false;
+    }
+  }
 
   async function retryOneTile(tile) {
     let success = false;
 
-    for (let attempt = 0; attempt < 3 && !success; attempt++) {
+    for (let attempt = 0; attempt < RETRY_ATTEMPTS && !success; attempt++) {
       try {
         const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `retry-${tile.qx}_${tile.qy}-`));
         const tmpHtml = path.join(tmpDir, `retry.html`);
@@ -373,11 +385,11 @@ async function retryMissingTiles(tiles, outputDir, seedLat, seedLng, cfg, blankS
               apiKey: validKeys[0],
               outputDir,
               blankSizeKb,
-              maxRetry: 2,
+              maxRetry: 0,
               cfg: retryCfg,
               seedLng, seedLat,
               protocolTimeout: PROTOCOL_TIMEOUT,
-              sessionMaxMs: 300000,
+              sessionMaxMs: RETRY_SESSION_MS,
               tmpHtmlPath: tmpHtml,
               userDataDir: userData,
               checkpointPath: null,
@@ -394,49 +406,81 @@ async function retryMissingTiles(tiles, outputDir, seedLat, seedLng, cfg, blankS
 
         const result = await Promise.race([
           worker,
-          new Promise(r => setTimeout(() => r({ ok: false, error: 'timeout' }), 120000))
+          new Promise(r => setTimeout(() => r({ ok: false, error: 'timeout' }), RETRY_TIMEOUT_MS))
         ]);
 
         if (result.ok) {
           success = true;
         } else {
-          await new Promise(r => setTimeout(r, 2000));
+          if (attempt === 0 && await tryFallback2D(tile)) {
+            success = true;
+          } else {
+            await new Promise(r => setTimeout(r, RETRY_BACKOFF_MS));
+          }
         }
 
         try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
       } catch (e) {}
     }
 
-    if (!success && RENDER_CFG.fallback?.enabled) {
-      try {
-        const { renderFallback2D } = await import('./src/tile/fallback_2d.mjs');
-        const r = await renderFallback2D(tile, seedLng, seedLat, RENDER_CFG, outputDir, null, 99);
-        if (r.ok) success = true;
-      } catch {}
+    if (!success) {
+      success = await tryFallback2D(tile);
     }
 
     return success;
   }
 
-  for (let i = 0; i < missingTiles.length; i += CONCURRENCY) {
-    const batch = missingTiles.slice(i, i + CONCURRENCY);
-    const results = await Promise.all(batch.map(tile => retryOneTile(tile)));
+  let round = 0;
+  let totalRecovered = 0;
+  let missingTiles = findMissingTiles(tiles, outputDir, blankSizeKb);
 
-    for (let j = 0; j < results.length; j++) {
-      if (results[j]) {
-        successCount++;
-        console.log(`[retry] (${batch[j].qx},${batch[j].qy}) ✓`);
-      } else {
-        failCount++;
-        console.log(`[retry] (${batch[j].qx},${batch[j].qy}) ✗`);
-      }
-    }
-
-    console.log(`[retry] Progress: ${i + batch.length}/${missingTiles.length}`);
+  if (missingTiles.length === 0) {
+    console.log('\n[retry] All tiles rendered successfully');
+    return;
   }
 
-  console.log(`\n[retry] Done. ${successCount}/${missingTiles.length} tiles recovered, ${failCount} failed`);
-  if (failCount > 0) console.log(`[retry] Warning: ${failCount} tiles still missing`);
+  while (missingTiles.length > 0 && round < RETRY_MAX_ROUNDS) {
+    round++;
+    console.log(`\n[retry] Round ${round}/${RETRY_MAX_ROUNDS}: ${missingTiles.length} missing/invalid tiles`);
+
+    let roundSuccess = 0;
+    let roundFail = 0;
+
+    for (let i = 0; i < missingTiles.length; i += CONCURRENCY) {
+      const batch = missingTiles.slice(i, i + CONCURRENCY);
+      const results = await Promise.all(batch.map(tile => retryOneTile(tile)));
+
+      for (let j = 0; j < results.length; j++) {
+        if (results[j]) {
+          roundSuccess++;
+          console.log(`[retry][r${round}] (${batch[j].qx},${batch[j].qy}) ✓`);
+        } else {
+          roundFail++;
+          console.log(`[retry][r${round}] (${batch[j].qx},${batch[j].qy}) ✗`);
+        }
+      }
+
+      console.log(`[retry][r${round}] Progress: ${i + batch.length}/${missingTiles.length}`);
+    }
+
+    totalRecovered += roundSuccess;
+    console.log(`[retry] Round ${round} done: ${roundSuccess} recovered, ${roundFail} still failing`);
+
+    missingTiles = findMissingTiles(tiles, outputDir, blankSizeKb);
+
+    if (missingTiles.length === 0) break;
+
+    // No progress this round → further rounds won't help either, stop early.
+    if (roundSuccess === 0) {
+      console.log(`[retry] No tiles recovered in round ${round}, stopping early (remaining tiles look permanently failing)`);
+      break;
+    }
+  }
+
+  console.log(`\n[retry] Done after ${round} round(s). ${totalRecovered} tiles recovered, ${missingTiles.length} still missing`);
+  if (missingTiles.length > 0) {
+    console.log(`[retry] Warning: ${missingTiles.length} tiles still missing after ${RETRY_MAX_ROUNDS} max rounds`);
+  }
 }
 
 await retryMissingTiles(pending, OUTPUT_DIR, seedLat, seedLng, RENDER_CFG, BLANK_SIZE_KB);

@@ -18,6 +18,14 @@ import { renderFallback2D } from './fallback_2d.mjs';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// Errors that mean the browser tab/session is dead and unusable — retrying
+// on the same `page` will just keep failing instantly for every remaining
+// tile. These must trigger a page recreation, not a normal tile-level retry.
+function isFatalPageError(msg) {
+  if (!msg) return false;
+  return /Target closed|detached Frame|Protocol error|Session closed|Connection closed/i.test(msg);
+}
+
 function createCleanup(tmpHtml, userDataDir) {
   return () => {
     try { if (fs.existsSync(tmpHtml)) fs.unlinkSync(tmpHtml); } catch {}
@@ -192,6 +200,11 @@ export async function runWorker(workerData) {
   let page = await createPage();
   report('Session ready');
 
+  if (cfg?.fallback?.enabled && !cfg.fallback.urlTemplate) {
+    report('[WARN] fallback.enabled=true but fallback.urlTemplate is missing — ' +
+           'blank tiles will NOT be recoverable via 2D fallback until this is set in config.');
+  }
+
   let pending = filterPendingTiles(tiles, outputDir, blankSizeKb);
   let doneSet = null;
   try {
@@ -206,9 +219,32 @@ export async function runWorker(workerData) {
 
   let doneCount = 0, failCount = 0, retryCount = 0;
   const failed = [];
-  const blankTiles = [];   // tiles where 3D render returned blank → fallback candidate
+  const blankUnrecovered = [];   // blank tiles where fallback also failed/disabled — for final summary only
   let errLogBuffer = '';
   let pageReady = true;
+
+  const MAX_PAGE_RECOVERIES = 3; // per tile, if the browser session dies mid-render
+
+  async function attemptFallbackNow(tile) {
+    if (!cfg?.fallback?.enabled) {
+      failCount++;
+      blankUnrecovered.push(tile);
+      report(`${doneCount}/${pending.length} tiles done, ${failCount} fail, ${retryCount} retry`);
+      return;
+    }
+    const r = await renderFallback2D(tile, seedLng, seedLat, cfg, outputDir, parentPort, workerId);
+    if (r.ok) {
+      doneCount++;
+      retryCount += r.retries ?? 0;
+      parentPort?.postMessage({ type: 'tile_done', workerId, qx: tile.qx, qy: tile.qy });
+    } else {
+      failCount++;
+      blankUnrecovered.push(tile);
+      errLogBuffer += `[FALLBACK] ${new Date().toISOString()} tile(${tile.qx},${tile.qy}): ${r.error}\n`;
+      try { fs.appendFileSync(errLog, errLogBuffer); errLogBuffer = ''; } catch {}
+    }
+    report(`${doneCount}/${pending.length} tiles done, ${failCount} fail, ${retryCount} retry`);
+  }
 
   for (const tile of pending) {
     if (!pageReady) {
@@ -237,7 +273,28 @@ export async function runWorker(workerData) {
       report(`Session #${sessionCount} ready`);
     }
 
-    const result = await renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blankSizeKb, maxRetry, parentPort, workerId);
+    // Render with automatic recovery
+    let result;
+    for (let recovery = 0; ; recovery++) {
+      result = await renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blankSizeKb, maxRetry, parentPort, workerId);
+
+      const fatal = !result.ok && !result.isBlank && isFatalPageError(result.error);
+      if (!fatal || recovery >= MAX_PAGE_RECOVERIES) break;
+
+      report(`[WARN] Page died (${result.error}) on tile (${tile.qx},${tile.qy}), recreating session (recovery ${recovery + 1}/${MAX_PAGE_RECOVERIES})...`);
+      pageReady = false;
+      try { await page.close(); } catch { /* ignore */ }
+      try {
+        page = await createPage();
+        sessionCount++;
+        sessionStart = Date.now();
+        pageReady = true;
+      } catch (e) {
+        report(`[WARN] Failed to recreate page: ${e.message}`);
+        pageReady = false;
+        break;
+      }
+    }
 
     // After this tile completes, if draining, finish up
     if (draining && currentTile === tile) {
@@ -265,10 +322,13 @@ export async function runWorker(workerData) {
         variance: result.variance, renderMs: result.renderMs,
       });
     } else if (result.isBlank) {
-      blankTiles.push(tile);
       retryCount += result.retries;
       errLogBuffer += `[BLANK] ${new Date().toISOString()} tile(${tile.qx},${tile.qy}): ${result.error}\n`;
       try { fs.appendFileSync(errLog, errLogBuffer); errLogBuffer = ''; } catch {}
+      // Try to recover it immediately via 2D fallback instead of queueing
+      // for a giant batch pass at the very end of the run.
+      await attemptFallbackNow(tile);
+      continue; // attemptFallbackNow already reports progress
     } else {
       failCount++;
       retryCount += result.retries;
@@ -277,7 +337,7 @@ export async function runWorker(workerData) {
       try { fs.appendFileSync(errLog, errLogBuffer); errLogBuffer = ''; } catch {}
     }
 
-    report(`${doneCount}/${pending.length} tiles done, ${failCount} fail, ${retryCount} retry, ${blankTiles.length} blank`);
+    report(`${doneCount}/${pending.length} tiles done, ${failCount} fail, ${retryCount} retry`);
   }
 
   if (errLogBuffer) fs.appendFileSync(errLog, errLogBuffer);
@@ -299,16 +359,37 @@ export async function runWorker(workerData) {
         pageReady = true;
       }
 
-      const result = await renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blankSizeKb, maxRetry, parentPort, workerId);
+      let result;
+      for (let recovery = 0; ; recovery++) {
+        result = await renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blankSizeKb, maxRetry, parentPort, workerId);
+
+        const fatal = !result.ok && !result.isBlank && isFatalPageError(result.error);
+        if (!fatal || recovery >= MAX_PAGE_RECOVERIES) break;
+
+        report(`[WARN] Page died (${result.error}) on retry tile (${tile.qx},${tile.qy}), recreating session (recovery ${recovery + 1}/${MAX_PAGE_RECOVERIES})...`);
+        pageReady = false;
+        try { await page.close(); } catch { /* ignore */ }
+        try {
+          page = await createPage();
+          sessionCount++;
+          sessionStart = Date.now();
+          pageReady = true;
+        } catch (e) {
+          report(`[WARN] Failed to recreate page: ${e.message}`);
+          pageReady = false;
+          break;
+        }
+      }
+
       if (result.ok) {
         doneCount++;
         failCount--;
         parentPort?.postMessage({ type: 'tile_done', workerId, qx: tile.qx, qy: tile.qy });
       } else if (result.isBlank) {
-        blankTiles.push(tile);
-        failCount--;
+        failCount--; // was counted in `failed`; attemptFallbackNow will re-count if it still fails
         errLogBuffer += `[BLANK-RETRY] ${new Date().toISOString()} tile(${tile.qx},${tile.qy}): ${result.error}\n`;
         try { fs.appendFileSync(errLog, errLogBuffer); errLogBuffer = ''; } catch {}
+        await attemptFallbackNow(tile);
       } else {
         errLogBuffer += `[RETRY] ${new Date().toISOString()} tile(${tile.qx},${tile.qy}): ${result.error}\n`;
         try { fs.appendFileSync(errLog, errLogBuffer); errLogBuffer = ''; } catch {}
@@ -317,30 +398,8 @@ export async function runWorker(workerData) {
     if (errLogBuffer) fs.appendFileSync(errLog, errLogBuffer);
   }
 
-  // ─── 2D fallback pass ───────────────────────────────────────────────
-  // For tiles where 3D render returned blank, fetch a 2D satellite tile.
-  // The fallback path runs in pure Node (no Puppeteer), so no pageReady needed.
-  if (blankTiles.length > 0 && cfg?.fallback?.enabled) {
-    report(`2D fallback pass: ${blankTiles.length} blank tiles → ${cfg.fallback.provider ?? 'esri'}`);
-    let fbOk = 0, fbFail = 0;
-    for (const tile of blankTiles) {
-      const r = await renderFallback2D(tile, seedLng, seedLat, cfg, outputDir, parentPort, workerId);
-      if (r.ok) {
-        doneCount++;
-        fbOk++;
-        retryCount += r.retries ?? 0;
-      } else {
-        failCount++;
-        fbFail++;
-        errLogBuffer += `[FALLBACK] ${new Date().toISOString()} tile(${tile.qx},${tile.qy}): ${r.error}\n`;
-        try { fs.appendFileSync(errLog, errLogBuffer); errLogBuffer = ''; } catch {}
-      }
-    }
-    report(`2D fallback done: ${fbOk} ok, ${fbFail} fail`);
-  } else if (blankTiles.length > 0) {
-    // Fallback disabled — blank tiles count as failures (preserves old behavior)
-    failCount += blankTiles.length;
-    report(`2D fallback disabled: ${blankTiles.length} blank tiles counted as fail`);
+  if (blankUnrecovered.length > 0) {
+    report(`${blankUnrecovered.length} blank tiles could not be recovered via fallback`);
   }
 
   if (errLogBuffer) fs.appendFileSync(errLog, errLogBuffer);

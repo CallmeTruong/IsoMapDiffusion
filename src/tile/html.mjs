@@ -312,8 +312,30 @@ window.analyzeCanvas = function() {
                || allCornersWhite
                || (topStripMeanR > topStripMeanRThr && topStripLowVar);
 
+  // ─── Google "Map data not yet available" placeholder detection ──────────
+  // When Google's Photorealistic 3D Tiles have no coverage for a location,
+  // it bakes an actual placeholder TEXTURE (English text + a small red
+  // marker dot) directly into the 3D scene — not a JS error, not a DOM
+  // overlay. Because it contains real text/edges, it has enough variance
+  // and edge density to sail past every check above and get saved as if
+  // it were valid terrain.
+  //
+  // Signature: this placeholder always uses one exact flat beige color as
+  // its background — measured as rgb(212, 206, 198) — and the text/dot are
+  // small and centered, so the four corners are *always* pure background.
+  // Real photorealistic terrain essentially never lands all 4 corners in
+  // this narrow, specific color range simultaneously.
+  const PLACEHOLDER_BG = { r: 212, g: 206, b: 198 };
+  const PLACEHOLDER_TOL = 12;
+  const isPlaceholderColor = s =>
+    Math.abs(s.r - PLACEHOLDER_BG.r) <= PLACEHOLDER_TOL &&
+    Math.abs(s.g - PLACEHOLDER_BG.g) <= PLACEHOLDER_TOL &&
+    Math.abs(s.b - PLACEHOLDER_BG.b) <= PLACEHOLDER_TOL;
+  const isGooglePlaceholder = corners.every(isPlaceholderColor);
+
   return {
-    isBlank,
+    isBlank: isBlank || isGooglePlaceholder,
+    isGooglePlaceholder,
     variance: Math.round(variance),
     meanR: Math.round(meanR),
     meanG: Math.round(meanG),

@@ -1,24 +1,3 @@
-"""
-Dataset module for training data preparation.
-
-NEW STRUCTURE (v2.0):
-    dataset/
-        images/
-            image_001.jpg   (target image - pixel art)
-            image_001.txt   (caption for target)
-            image_002.jpg
-            image_002.txt
-            ...
-        control/
-            image_001.jpg   (control image - template with red border)
-            image_002.jpg
-            ...
-        prompts/
-            prompt.txt         (COMMON prompt - used by all)
-        dataset_mapping.csv    (mapping: caption_path, control_path, prompt_path)
-        dataset_metadata.json  (metadata)
-"""
-
 from .omni import (
     OmniMasker,
     apply_noise,
