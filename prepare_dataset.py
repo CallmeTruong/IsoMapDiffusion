@@ -60,22 +60,7 @@ def prepare_new_dataset(
     seed: int = 42,
     prompt: str = COMMON_PROMPT,
 ) -> dict:
-    """
-    Create dataset in NEW structure:
-        dataset/
-            images/
-                image_001.jpg, image_001.txt
-                image_002.jpg, image_002.txt
-                ...
-            control/
-                image_001.jpg
-                image_002.jpg
-                ...
-        prompts/
-            prompt.txt
-        dataset_mapping.csv
-        dataset_metadata.json
-    """
+
     from PIL import Image
     import random
     random.seed(seed)
