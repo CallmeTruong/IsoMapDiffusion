@@ -1,24 +1,3 @@
-"""
-ControlNet Dataset for training with control images.
-
-NEW STRUCTURE (v2.0):
-    dataset/
-        images/
-            image_001.jpg   (target image - pixel art)
-            image_001.txt   (caption for target)
-            image_002.jpg
-            image_002.txt
-            ...
-        control/
-            image_001.jpg   (control image - template with red border)
-            image_002.jpg
-            ...
-        prompts/
-            prompt.txt         (COMMON prompt - used by all)
-        dataset_mapping.csv
-        dataset_metadata.json
-"""
-
 import os
 import random
 from pathlib import Path

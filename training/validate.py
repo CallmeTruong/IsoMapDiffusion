@@ -1,21 +1,3 @@
-"""
-Validate dataset structure for training.
-
-NEW STRUCTURE (v2.0):
-    dataset/
-        images/
-            image_001.jpg
-            image_001.txt
-            ...
-        control/
-            image_001.jpg
-            ...
-        prompts/
-            prompt.txt
-        dataset_mapping.csv
-        dataset_metadata.json
-"""
-
 import os
 import argparse
 from pathlib import Path
@@ -24,15 +6,7 @@ import pandas as pd
 
 
 def validate_new_structure(data_path: str) -> bool:
-    """
-    Validate new dataset structure (v2.0).
 
-    Args:
-        data_path: Path to dataset directory (contains images/, control/, prompts/)
-
-    Returns:
-        bool: True if valid, False otherwise
-    """
     data_dir = Path(data_path)
     valid = True
 
