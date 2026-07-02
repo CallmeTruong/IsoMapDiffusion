@@ -1,26 +1,27 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { Worker } from 'worker_threads';
 
-import { TILE, TILE_SIZE_M, CELL_SIZE_M, WORKERS, PATHS, GOOGLE, TMP, CHECKPOINT, PROVIDERS, resolvePath } from './config.mjs';
-import { getGoogleKeys, parseArgs } from './config.mjs';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = __dirname;
+
+import { TILE, TILE_SIZE_M, CELL_SIZE_M, WORKERS, PATHS, GOOGLE, TMP, CHECKPOINT, PROVIDERS, FALLBACK, resolvePath } from './src/config.mjs';
+import { getGoogleKeys, parseArgs } from './src/config.mjs';
 import {
-  projectRoot, loadEnv, resolveNumWorkers, buildRenderCfg, RENDER_DEFAULTS,
-  resolveCredentials, getProvider, resolveApiKey,
-  validateAllGoogleKeys, chunkArray, exportRenderOutputs,
-} from './render/index.mjs';
+  loadEnv, resolveNumWorkers, buildRenderCfg, getProvider, resolveApiKey,
+  chunkArray, exportRenderOutputs,
+} from './src/render/index.mjs';
 import {
   computeSeedPoint, cellsToQuadrants, computeTiles,
   filterPendingTiles, sortPendingByPriority,
   initDB, insertOrIgnoreQuadrant, updateQuadrantAttempt,
   loadCheckpoint, saveCheckpoint, CheckpointTracker, isTileFullyRendered,
-} from './tile/index.mjs';
+} from './src/tile/index.mjs';
 
 // ─── Setup ────────────────────────────────────────────────────────────────────
 
-const __dirname = path.dirname(new URL(import.meta.url).pathname.replace(/^\//, ''));
-const PROJECT_ROOT = projectRoot(import.meta.url);
 loadEnv(PROJECT_ROOT);
 
 const ARGS = parseArgs();
@@ -33,6 +34,7 @@ const DB_PATH       = ARGS.db       ?? resolvePath('db');
 
 const NUM_WORKERS = resolveNumWorkers(ARGS.workers);
 const RENDER_CFG  = buildRenderCfg(ARGS);
+RENDER_CFG.fallback = FALLBACK;
 
 const SESSION_MAX_MS   = TILE.sessionMaxMs;
 const PROTOCOL_TIMEOUT = TILE.protocolTimeout;
@@ -209,12 +211,54 @@ const mainCleanup = () => {
   cleanupTemp();
   try { checkpointTracker.close(); } catch {}
 };
-process.on('SIGINT',  () => { console.log('\nInterrupted.'); mainCleanup(); process.exit(1); });
-process.on('SIGTERM', () => { mainCleanup(); process.exit(1); });
+
+let allWorkers = [];
+
+async function gracefulShutdown(signal) {
+  console.log(`\n${signal} received, flushing checkpoint...`);
+
+  const workerPromises = allWorkers.map(({ worker, workerId }, i) => {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        console.log(`Worker ${workerId} flush timeout, forcing exit`);
+        resolve();
+      }, 10000);
+
+      worker.postMessage({ type: 'flush_checkpoint' });
+
+      const doneHandler = (msg) => {
+        if (msg.type === 'done' || msg.type === 'flush_done') {
+          worker.off('message', doneHandler);
+          clearTimeout(timeout);
+          console.log(`Worker ${workerId} flushed and exited`);
+          resolve();
+        }
+      };
+      worker.on('message', doneHandler);
+    });
+  });
+
+  await Promise.all(workerPromises);
+
+  try {
+    checkpointTracker.flush();
+    console.log(`Checkpoint flushed: ${checkpointTracker.size} tiles saved`);
+  } catch (e) {
+    console.warn('Checkpoint flush warning:', e.message);
+  }
+
+  mainCleanup();
+  process.exit(1);
+}
+
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 const workerPromises = chunks.map((chunk, i) => new Promise((resolve, reject) => {
   const cfg = { ...workerTemplate, tiles: chunk, workerId: i, tmpHtmlPath: tmpHtml(i), userDataDir: userData(i) };
-  const worker = new Worker(new URL('./tile/worker_entry.mjs', import.meta.url), { workerData: cfg });
+  const worker = new Worker(new URL('./src/tile/worker_entry.mjs', import.meta.url), { workerData: cfg });
+
+  allWorkers.push({ worker, workerId: i });
 
   worker.on('message', async msg => {
     if (msg.type === 'progress') {
@@ -273,6 +317,173 @@ console.log('  Elapsed: ' + Math.floor(elapsed/60) + 'm' + Math.round(elapsed%60
 console.log('  Rate: ' + (totalDone / elapsed).toFixed(2) + ' tiles/s');
 
 if (totalFail > 0) console.log('\n' + totalFail + ' tiles failed — check render_errors_w*.log');
+
+// ─── Auto-retry missing/failed tiles ─────────────────────────────────────────
+
+const RETRY_ATTEMPTS   = 2;
+const RETRY_TIMEOUT_MS = 45000;
+const RETRY_SESSION_MS = 120000;
+const RETRY_BACKOFF_MS = 500;
+const RETRY_MAX_ROUNDS = 3;
+
+function findMissingTiles(tiles, outputDir, blankSizeKb) {
+  const missingTiles = [];
+
+  for (const tile of tiles) {
+    let hasValid = false;
+    try {
+      const files = fs.readdirSync(outputDir);
+      for (const f of files) {
+        if (f.includes(`_${tile.qx}_${tile.qy}_`)) {
+          const stat = fs.statSync(path.join(outputDir, f));
+          if (stat.size >= blankSizeKb * 1024) {
+            hasValid = true;
+            break;
+          }
+        }
+      }
+    } catch {}
+
+    if (!hasValid) {
+      missingTiles.push(tile);
+    }
+  }
+
+  return missingTiles;
+}
+
+async function retryMissingTiles(tiles, outputDir, seedLat, seedLng, cfg, blankSizeKb) {
+  const CONCURRENCY = Math.min(Math.max(NUM_WORKERS, 1), 8);
+  const retryCfg = { ...cfg, tileWaitMs: (cfg.tileWaitMs ?? 12000) + 3000 };
+
+  async function tryFallback2D(tile) {
+    if (!RENDER_CFG.fallback?.enabled) return false;
+    try {
+      const { renderFallback2D } = await import('./src/tile/fallback_2d.mjs');
+      const r = await renderFallback2D(tile, seedLng, seedLat, RENDER_CFG, outputDir, null, 99);
+      return !!r.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async function retryOneTile(tile) {
+    let success = false;
+
+    for (let attempt = 0; attempt < RETRY_ATTEMPTS && !success; attempt++) {
+      try {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `retry-${tile.qx}_${tile.qy}-`));
+        const tmpHtml = path.join(tmpDir, `retry.html`);
+        const userData = path.join(tmpDir, 'profile');
+
+        const worker = new Promise((resolve) => {
+          const w = new Worker(new URL('./src/tile/worker_entry.mjs', import.meta.url), {
+            workerData: {
+              tiles: [tile],
+              workerId: 99,
+              provider: PROVIDER_ID,
+              apiKey: validKeys[0],
+              outputDir,
+              blankSizeKb,
+              maxRetry: 0,
+              cfg: retryCfg,
+              seedLng, seedLat,
+              protocolTimeout: PROTOCOL_TIMEOUT,
+              sessionMaxMs: RETRY_SESSION_MS,
+              tmpHtmlPath: tmpHtml,
+              userDataDir: userData,
+              checkpointPath: null,
+            },
+          });
+
+          w.on('message', m => {
+            if (m.type === 'tile_done') resolve({ ok: true });
+            else if (m.type === 'done') resolve({ ok: m.stats?.doneCount > 0 });
+            else if (m.type === 'error') resolve({ ok: false, error: m.error });
+          });
+          w.on('error', e => resolve({ ok: false, error: e.message }));
+        });
+
+        const result = await Promise.race([
+          worker,
+          new Promise(r => setTimeout(() => r({ ok: false, error: 'timeout' }), RETRY_TIMEOUT_MS))
+        ]);
+
+        if (result.ok) {
+          success = true;
+        } else {
+          if (attempt === 0 && await tryFallback2D(tile)) {
+            success = true;
+          } else {
+            await new Promise(r => setTimeout(r, RETRY_BACKOFF_MS));
+          }
+        }
+
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      } catch (e) {}
+    }
+
+    if (!success) {
+      success = await tryFallback2D(tile);
+    }
+
+    return success;
+  }
+
+  let round = 0;
+  let totalRecovered = 0;
+  let missingTiles = findMissingTiles(tiles, outputDir, blankSizeKb);
+
+  if (missingTiles.length === 0) {
+    console.log('\n[retry] All tiles rendered successfully');
+    return;
+  }
+
+  while (missingTiles.length > 0 && round < RETRY_MAX_ROUNDS) {
+    round++;
+    console.log(`\n[retry] Round ${round}/${RETRY_MAX_ROUNDS}: ${missingTiles.length} missing/invalid tiles`);
+
+    let roundSuccess = 0;
+    let roundFail = 0;
+
+    for (let i = 0; i < missingTiles.length; i += CONCURRENCY) {
+      const batch = missingTiles.slice(i, i + CONCURRENCY);
+      const results = await Promise.all(batch.map(tile => retryOneTile(tile)));
+
+      for (let j = 0; j < results.length; j++) {
+        if (results[j]) {
+          roundSuccess++;
+          console.log(`[retry][r${round}] (${batch[j].qx},${batch[j].qy}) ✓`);
+        } else {
+          roundFail++;
+          console.log(`[retry][r${round}] (${batch[j].qx},${batch[j].qy}) ✗`);
+        }
+      }
+
+      console.log(`[retry][r${round}] Progress: ${i + batch.length}/${missingTiles.length}`);
+    }
+
+    totalRecovered += roundSuccess;
+    console.log(`[retry] Round ${round} done: ${roundSuccess} recovered, ${roundFail} still failing`);
+
+    missingTiles = findMissingTiles(tiles, outputDir, blankSizeKb);
+
+    if (missingTiles.length === 0) break;
+
+    // No progress this round → further rounds won't help either, stop early.
+    if (roundSuccess === 0) {
+      console.log(`[retry] No tiles recovered in round ${round}, stopping early (remaining tiles look permanently failing)`);
+      break;
+    }
+  }
+
+  console.log(`\n[retry] Done after ${round} round(s). ${totalRecovered} tiles recovered, ${missingTiles.length} still missing`);
+  if (missingTiles.length > 0) {
+    console.log(`[retry] Warning: ${missingTiles.length} tiles still missing after ${RETRY_MAX_ROUNDS} max rounds`);
+  }
+}
+
+await retryMissingTiles(pending, OUTPUT_DIR, seedLat, seedLng, RENDER_CFG, BLANK_SIZE_KB);
 
 // ─── Export outputs ──────────────────────────────────────────────────────────
 

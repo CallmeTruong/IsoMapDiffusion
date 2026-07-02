@@ -1,12 +1,11 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { generateGrid } from './grid/index.mjs';
-import { GRID, PATHS } from './config.mjs';
+import { generateGrid } from './src/grid/index.mjs';
+import { GRID, PATHS } from './src/config.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = path.resolve(__dirname, '..');
+const PROJECT_ROOT = __dirname;
 
-// Parse CLI arguments
 const ARGS = Object.fromEntries(
   process.argv.slice(2)
     .filter(a => a.startsWith('--'))
@@ -25,8 +24,10 @@ const options = {
   infraFile: ARGS.infra
     ? path.resolve(PROJECT_ROOT, ARGS.infra)
     : path.resolve(PROJECT_ROOT, PATHS.infra),
+
   cellSizeKm: Number(ARGS.cell ?? GRID.cellSizeKm),
   minWaterM2: Number(ARGS.minwater ?? GRID.minWaterM2),
+
   outputDir: ARGS.out
     ? path.resolve(PROJECT_ROOT, ARGS.out)
     : path.join(PROJECT_ROOT, 'output'),
@@ -39,5 +40,4 @@ console.log('  infra    :', options.infraFile);
 console.log('  output   :', options.outputDir);
 console.log('  cell     :', options.cellSizeKm, 'km');
 
-// Run
 generateGrid(options);

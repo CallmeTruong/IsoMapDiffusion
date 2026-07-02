@@ -48,14 +48,29 @@ const DEFAULTS = {
     varianceThr:      250,
 
     // Blank/blurry thresholds (for analyzeCanvas)
-    blankVarianceThr: 800,
+    blankVarianceThr: 600,
     blankEdgeThr:     0.15,
     blankMeanThr:     [60, 110],
     blankSizeKb:      30,
-    blankMeanRThr:    250,    // > 250 = skydome / flat white
+    blankMeanRThr:    250,
 
     // Retry
     maxRetry:         3,
+
+    // 2D Fallback (for tiles where 3D render fails/blank)
+    fallback: {
+      enabled:        true,    // Enable 2D satellite fallback
+      provider:      'esri',   // esri | mapbox | osm
+      maxRetries3D:  3,       // Max 3D retries before fallback
+      urlTemplate:   'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      minZoom:       14,       // zoom level used to compute slippy x/y for the fallback fetch
+      requestTimeoutMs: 8000,  // fetch timeout for the fallback tile request
+      // Post-process look (see postProcess2D in fallback_2d.mjs) — defaults
+      postProcess:    'desat-sepia', // 'desat-sepia' | 'none'
+      desatAmount:    0.35,
+      sepiaAmount:    0.20,
+      contrastBoost:  1.05,
+    },
 
     // Worker session
     sessionMaxMs:     2.9 * 60 * 60 * 1000,
@@ -260,6 +275,7 @@ export const QUALITY = _cfg.QUALITY;
 export const GEO = _cfg.GEO;
 export const CESIUM = _cfg.CESIUM;
 export const SEEDS = _cfg.SEEDS;
+export const FALLBACK = _cfg.TILE?.fallback ?? { enabled: false };
 export const DEFAULTS_ALL = DEFAULTS;
 
 // ─── Derived constants (backward compat) ──────────────────────────────
