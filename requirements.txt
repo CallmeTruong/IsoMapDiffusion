@@ -1,0 +1,37 @@
+# Core ML
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Diffusers for Qwen-Image-Edit
+diffusers>=0.30.0
+transformers>=4.36.0
+accelerate>=0.25.0
+
+# Image processing
+Pillow>=10.0.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# SSH/SFTP for remote providers
+paramiko>=3.3.0
+
+# HTTP client (for API providers)
+httpx>=0.25.0
+
+# Utils
+tqdm>=4.66.0
+
+# LoRA training
+peft>=0.6.0
+bitsandbytes>=0.41.0
+optimum-quanto>=0.2.0
+
+# Config
+omegaconf>=2.3.0
+
+# Data
+datasets>=2.14.0
+
+# Local packages (included in project):
+# - training/control_dataset.py
+# - src/ (constants.py, dataset/)
