@@ -33,16 +33,14 @@ function createCleanup(tmpHtml, userDataDir) {
   };
 }
 
-/**
- * Render one tile and save as 1 file (1024×1024).
- */
+
 async function renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blankSizeKb, maxRetry, parentPort, workerId) {
 
   const { lat, lng } = tileIndexToLatLng(tile.qx, tile.qy, seedLat, seedLng, cfg);
 
   const fbEnabled = !!cfg?.fallback?.enabled;
   const effectiveMaxRetry = fbEnabled
-    ? Math.min(maxRetry, cfg.fallback.maxRetries3D ?? 1)
+    ? Math.min(maxRetry, cfg.fallback.maxRetries3D ?? 3)
     : maxRetry;
 
   for (let attempt = 0; attempt < effectiveMaxRetry; attempt++) {
@@ -58,7 +56,7 @@ async function renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blank
       if (analysis.isBlank) {
         if (attempt < effectiveMaxRetry - 1) continue;
         if (fbEnabled) {
-          return { ok: false, isBlank: true, error: 'Blank tile (will fallback)', retries: attempt };
+          return { ok: false, isBlank: true, error: `Blank after ${effectiveMaxRetry} 3D attempts (placeholder=${!!analysis.isGooglePlaceholder})`, retries: attempt };
         }
         throw new Error('Blank tile');
       }
@@ -67,6 +65,7 @@ async function renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blank
       const buf = Buffer.from(tileDataUrl.split(',')[1], 'base64');
 
       const result = saveTile(buf, { qx: tile.qx, qy: tile.qy }, {
+        source: '3D',
         lat, lng,
         cameraAzimuth: cfg.azimuth,
         cameraElevation: cfg.elevation,
@@ -82,12 +81,6 @@ async function renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blank
         seedLat, seedLng,
       }, outputDir);
 
-      // Mark quadrant boundaries (single cell) for downstream stitching
-      parentPort?.postMessage({
-        type: 'db_update', qx: tile.qx, qy: tile.qy,
-        info: { workerId, variance: analysis.variance, renderMs },
-      });
-
       if (result.sizeKB >= blankSizeKb) {
         clearTileDeletedMarker(outputDir, tile.qx, tile.qy);
       } else {
@@ -99,11 +92,6 @@ async function renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blank
       return { ok: true, retries: attempt, ...result, variance: analysis.variance, renderMs };
     } catch (e) {
       if (attempt === effectiveMaxRetry - 1) {
-        parentPort?.postMessage({
-          type: 'db_update',
-          qx: tile.qx, qy: tile.qy,
-          info: { workerId, error: e.message },
-        });
         return { ok: false, error: e.message, retries: attempt };
       }
     }

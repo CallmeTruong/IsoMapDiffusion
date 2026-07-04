@@ -41,7 +41,7 @@ const DEFAULTS = {
     targetHeight:     0,
 
     // Settle / wait timing
-    tileWaitMs:       12000,
+    tileWaitMs:       25000,
     settlePollMs:     300,
     settleMaxMs:      4000,
     stableHits:       5,
@@ -63,7 +63,7 @@ const DEFAULTS = {
       provider:      'esri',   // esri | mapbox | osm
       maxRetries3D:  3,       // Max 3D retries before fallback
       urlTemplate:   'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-      minZoom:       14,       // zoom level used to compute slippy x/y for the fallback fetch
+      minZoom:       17,       // zoom level used to compute slippy x/y for the fallback fetch (z17 ≈ 150m/tile, matches ~100m quadrants)
       requestTimeoutMs: 8000,  // fetch timeout for the fallback tile request
       // Post-process look (see postProcess2D in fallback_2d.mjs) — defaults
       postProcess:    'desat-sepia', // 'desat-sepia' | 'none'
