@@ -172,17 +172,17 @@ async function retryMissingTiles(originalTiles, outputDir, cfg, seed) {
   console.log(`\n[retry] Found ${missingTiles.length} missing/invalid tiles, retrying...`);
 
   // Retry with more patience (longer wait, more retries)
-  const retryCfg = { ...cfg, tileWaitMs: cfg.tileWaitMs + 3000 };
-  
+  const retryCfg = { ...cfg, tileWaitMs: cfg.tileWaitMs + TILE.retryPassWaitBonusMs };
+
   for (const tile of missingTiles) {
     let success = false;
-    
-    for (let attempt = 0; attempt < 3; attempt++) {
+
+    for (let attempt = 0; attempt < TILE.retryPassCount; attempt++) {
       try {
         const ll = tileIndexToLatLng(tile.qx, tile.qy, seed.lat, seed.lng, cfg);
         const tmpHtml = path.join(os.tmpdir(), `retry_w0_${Date.now()}.html`);
         const userData = path.join(os.tmpdir(), `retry_w0_${Date.now()}`);
-        
+
         const worker = new Promise((resolve, reject) => {
           const w = new Worker(new URL('../tile/worker_entry.mjs', import.meta.url), {
             workerData: {
@@ -192,12 +192,12 @@ async function retryMissingTiles(originalTiles, outputDir, cfg, seed) {
               apiKey: process.env.CESIUM_TOKEN || process.env.CESIUM_ION_TOKEN,
               outputDir,
               blankSizeKb,
-              maxRetry: 2,
+              maxRetry: TILE.maxRetry,
               cfg: retryCfg,
               seedLng: seed.lng,
               seedLat: seed.lat,
-              protocolTimeout: 120000,
-              sessionMaxMs: 300000,
+              protocolTimeout: TILE.protocolTimeout,
+              sessionMaxMs: TILE.sessionMaxMs,
               tmpHtmlPath: tmpHtml,
               userDataDir: userData,
               checkpointPath: null,
@@ -214,7 +214,7 @@ async function retryMissingTiles(originalTiles, outputDir, cfg, seed) {
 
         const result = await Promise.race([
           worker,
-          sleep(120000).then(() => ({ ok: false, error: 'timeout' }))
+          sleep(TILE.retryTimeoutMs).then(() => ({ ok: false, error: 'timeout' })),
         ]);
 
         if (result.ok) {
@@ -223,7 +223,7 @@ async function retryMissingTiles(originalTiles, outputDir, cfg, seed) {
           break;
         } else {
           console.log(`[retry] (${tile.qx},${tile.qy}) attempt ${attempt + 1} failed: ${result.error}`);
-          await sleep(2000); // Wait before retry
+          await sleep(TILE.retrySleepMs); // Wait before retry
         }
       } catch (e) {
         console.log(`[retry] (${tile.qx},${tile.qy}) error: ${e.message}`);

@@ -1,6 +1,8 @@
 import * as turf from '@turf/turf';
+import { GRID } from '../config.mjs';
 
-export function hasLand(cell, waterSearch, waterFeatures, minLandM2 = 100) {
+export function hasLand(cell, waterSearch, waterFeatures, minLandM2) {
+  const threshold = minLandM2 ?? GRID.minWaterM2;
   const cellBBox = turf.bbox(cell);
   const result = waterSearch(cellBBox);
   const candidates = result.features;
@@ -51,7 +53,7 @@ export function hasLand(cell, waterSearch, waterFeatures, minLandM2 = 100) {
   }
 
   const finalArea = turf.area(remainingCell);
-  return finalArea >= minLandM2;
+  return finalArea >= threshold;
 }
 
 /**

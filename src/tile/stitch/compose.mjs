@@ -1,5 +1,5 @@
 import sharp from 'sharp';
-import { STITCH } from '../../config.mjs';
+import { STITCH, TILE } from '../../config.mjs';
 import { computeLayout } from './layout.mjs';
 
 /** Default background color (RGBA) */
@@ -116,15 +116,16 @@ export async function stitchTiles({ tiles, gridSize, tileSize, stride, backgroun
 }
 
 
-export async function stitchPair({ pngA, pngB, offset, tileSize = 1024, gapColor, seamColor }) {
+export async function stitchPair({ pngA, pngB, offset, tileSize, gapColor, seamColor }) {
+  const ts = tileSize ?? TILE.sizePx;
   if (typeof offset !== 'number' || offset < 0) {
     throw new Error(`stitchPair: offset must be ≥ 0, got ${offset}`);
   }
 
   const bg = gapColor ?? DEFAULT_PAIR_GAP;
-  const stitchW = tileSize + offset;
+  const stitchW = ts + offset;
 
-  const base = await createBaseCanvas(stitchW, tileSize, bg);
+  const base = await createBaseCanvas(stitchW, ts, bg);
   const composite = [
     { input: pngA, top: 0, left: 0 },
     { input: pngB, top: 0, left: offset },
@@ -132,9 +133,9 @@ export async function stitchPair({ pngA, pngB, offset, tileSize = 1024, gapColor
 
   let result = base.composite(composite);
 
-  if (seamColor && offset > 0 && offset < tileSize) {
-    const svg = `<svg width="${stitchW}" height="${tileSize}" xmlns="http://www.w3.org/2000/svg">
-      <line x1="${offset}" y1="0" x2="${offset}" y2="${tileSize}" stroke="${rgbaStr(seamColor)}" stroke-width="1" />
+  if (seamColor && offset > 0 && offset < ts) {
+    const svg = `<svg width="${stitchW}" height="${ts}" xmlns="http://www.w3.org/2000/svg">
+      <line x1="${offset}" y1="0" x2="${offset}" y2="${ts}" stroke="${rgbaStr(seamColor)}" stroke-width="1" />
     </svg>`;
     const overlayBuf = await sharp(Buffer.from(svg)).png().toBuffer();
     result = result.composite([{ input: overlayBuf, top: 0, left: 0 }]);

@@ -44,7 +44,7 @@ export function buildRenderCfg(args = {}) {
     elevation:      Number(args.elevation ?? args.pitch    ?? TILE.elevation),
     altitude:       Number(args.altitude  ?? TILE.altitude),
     frustumW:       TILE_SIZE_M,
-    tileStep:       TILE.tileStep,
+    tileStep:       TILE.cameraMoveStep,
     cameraMoveStep: TILE.cameraMoveStep,
     quadrantM:      QUADRANT_M,
     targetHeight:   TILE.targetHeight ?? 0,

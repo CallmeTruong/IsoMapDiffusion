@@ -1,9 +1,3 @@
-"""
-src/helpers.py
-
-Helper functions for the isometric pipeline.
-"""
-
 import os
 from pathlib import Path
 

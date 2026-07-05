@@ -1,4 +1,5 @@
 import sharp from 'sharp';
+import { TILE } from '../config.mjs';
 import { tileIndexToLatLng } from './coords.mjs';
 import { tileIndexToSlippyXYZ } from './coords_slippy.mjs';
 import { saveTile } from './tile_io.mjs';
@@ -25,7 +26,7 @@ export async function renderFallback2D(tile, seedLng, seedLat, cfg, outputDir, p
   }
 
   const { lat, lng } = tileIndexToLatLng(tile.qx, tile.qy, seedLat, seedLng, cfg);
-  const z = fb.minZoom ?? 14;
+  const z = fb.minZoom ?? TILE.fallback.defaultMinZoom;
   const { x, y } = tileIndexToSlippyXYZ(lat, lng, z);
 
   const url = fb.urlTemplate
@@ -36,12 +37,12 @@ export async function renderFallback2D(tile, seedLng, seedLat, cfg, outputDir, p
   let buf;
   try {
     const res = await fetch(url, {
-      signal: AbortSignal.timeout(fb.requestTimeoutMs ?? 8_000),
-      headers: { 'User-Agent': 'isometric-style-convert/1.0' },
+      signal: AbortSignal.timeout(fb.requestTimeoutMs ?? TILE.fallback.requestTimeoutMs),
+      headers: { 'User-Agent': TILE.fallback.userAgent },
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length < 100) throw new Error('Empty tile (likely ocean/pole)');
+    if (buf.length < TILE.fallback.minResponseBytes) throw new Error('Empty tile (likely ocean/pole)');
   } catch (e) {
     parentPort?.postMessage({
       type: 'db_update',
@@ -53,7 +54,7 @@ export async function renderFallback2D(tile, seedLng, seedLat, cfg, outputDir, p
 
   let processed;
   try {
-    processed = await postProcess2D(buf, fb, cfg.sizePx ?? 1024);
+    processed = await postProcess2D(buf, fb, cfg.sizePx);
   } catch (e) {
     parentPort?.postMessage({
       type: 'db_update',
@@ -98,10 +99,10 @@ export async function renderFallback2D(tile, seedLng, seedLat, cfg, outputDir, p
  *
  * @param {Buffer} buf - input PNG/JPEG bytes from provider
  * @param {object} fbCfg - fallback config (desatAmount, sepiaAmount, contrastBoost, postProcess)
- * @param {number} tilePx - output tile size in px (default 1024)
+ * @param {number} tilePx - output tile size in px
  * @returns {Promise<Buffer>} processed PNG buffer
  */
-export async function postProcess2D(buf, fbCfg, tilePx = 1024) {
+export async function postProcess2D(buf, fbCfg, tilePx) {
   const skipPost = (fbCfg.postProcess ?? 'desat-sepia') === 'none';
   const out = await sharp(buf)
     .ensureAlpha()

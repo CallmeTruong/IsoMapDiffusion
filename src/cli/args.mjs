@@ -2,7 +2,7 @@
  * cli/args.mjs — CLI argument parser + help text
  */
 
-import { STITCH } from '../config.mjs';
+import { STITCH, TILE } from '../config.mjs';
 
 /**
  * Parse argv into { positional, flags }.
@@ -54,7 +54,7 @@ Options:
   --step=<0..1>            Camera move step (default: 0.5)
   --azimuth=<deg>          Camera azimuth (default: 180)
   --elevation=<deg>        Camera elevation (default: -45)
-  --altitude=<m>           Camera altitude (default: 2000)
+  --altitude=<m>           Camera altitude (default: ${TILE.altitude})
   --sse=<num>              Screen space error (default: 8)
   --fallback=true|false    Enable/disable 2D satellite fallback (default: env FALLBACK_ENABLED)
                            When ON, blank 3D tiles will automatically fetch a 2D image (ESRI) instead.

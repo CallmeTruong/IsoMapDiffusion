@@ -24,7 +24,7 @@ function isMetaBad(meta, thr) {
   if (!meta) return false;
   if (meta.isBlank === true) return true;
   if (typeof meta.variance === 'number' && meta.variance < thr.blankVarianceThr) return true;
-  if (meta.meanR !== undefined && meta.meanR > 250) return true;
+  if (meta.meanR !== undefined && meta.meanR > TILE.blankMeanRThr) return true;
   if (typeof meta.edgeDensity === 'number' && meta.edgeDensity < thr.blankEdgeThr) return true;
   return false;
 }

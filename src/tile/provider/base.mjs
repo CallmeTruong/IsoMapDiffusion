@@ -1,3 +1,5 @@
+import { RENDER } from '../../config.mjs';
+
 export class TileProvider {
   constructor(id, envVar, displayName) {
     if (this.constructor === TileProvider) {
@@ -21,6 +23,6 @@ export class TileProvider {
   }
 
   getTilesetWaitMs() {
-    return 30_000;
+    return RENDER.tilesetWaitMs;
   }
 }
