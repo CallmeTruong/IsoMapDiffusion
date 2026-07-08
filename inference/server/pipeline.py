@@ -17,17 +17,21 @@ class QwenEditPipeline:
         self,
         base_model: str = "Qwen/Qwen-Image-Edit",
         lora_path: Optional[str] = None,
+        lora_adapter_name: str = "isometric",
+        lora_weight: float = 1.0,
         dtype: str = "bfloat16",
         device: str = "cuda",
     ):
         self.base_model = base_model
         self.lora_path = lora_path
+        self.lora_adapter_name = lora_adapter_name
+        self.lora_weight = lora_weight
         self.dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
         self.device = device
         self.pipe: Optional[QwenImageEditPipeline] = None
 
-    def load(self, lora_adapter_name: str = "isometric") -> None:
-        """Load the base pipeline and optionally attach LoRA weights."""
+    def load(self) -> None:
+        """Load the base pipeline and attach LoRA weights. Raises if LoRA fails to load."""
         print(f"Loading base model: {self.base_model}")
 
         self.pipe = QwenImageEditPipeline.from_pretrained(
@@ -37,16 +41,20 @@ class QwenEditPipeline:
 
         if self.lora_path and Path(self.lora_path).exists():
             print(f"Loading LoRA from: {self.lora_path}")
-            try:
-                self.pipe.load_lora_weights(
-                    self.lora_path,
-                    adapter_name=lora_adapter_name,
-                )
-                self.pipe.set_adapters([lora_adapter_name], adapter_weights=[1.0])
-                print(f"LoRA '{lora_adapter_name}' loaded successfully")
-            except Exception as e:
-                print(f"Warning: Failed to load LoRA: {e}")
-                print("Continuing with base model only")
+            self.pipe.load_lora_weights(
+                self.lora_path,
+                adapter_name=self.lora_adapter_name,
+            )
+            self.pipe.set_adapters(
+                [self.lora_adapter_name],
+                adapter_weights=[self.lora_weight],
+            )
+            print(f"LoRA '{self.lora_adapter_name}' loaded successfully (weight={self.lora_weight})")
+        else:
+            raise RuntimeError(
+                f"LoRA path is required but not found: {self.lora_path}. "
+                "Please set LORA_PATH in .env to a valid LoRA weights directory."
+            )
 
         self.pipe.to(self.device)
         print("Pipeline ready on", self.device)

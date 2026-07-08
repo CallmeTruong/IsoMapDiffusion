@@ -21,6 +21,11 @@ httpx>=0.25.0
 # Utils
 tqdm>=4.66.0
 
+# FastAPI server
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+python-dotenv>=1.0.0
+
 # LoRA training
 peft>=0.6.0
 bitsandbytes>=0.41.0

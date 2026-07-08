@@ -2,13 +2,23 @@
 
 import base64
 import os
+import sys
 import time
 from io import BytesIO
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
+
+# Load .env file from inference directory
+_env_path = Path(__file__).parent.parent / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path)
+    print(f"Loaded environment from {_env_path}")
+else:
+    print(f"WARNING: No .env file found at {_env_path}")
 
 from .models import EditRequest, EditResponse, HealthResponse, ModelsResponse
 from .pipeline import QwenEditPipeline
@@ -19,11 +29,22 @@ model_name: str = "base"
 
 # Load config from environment or defaults
 BASE_MODEL = os.environ.get("BASE_MODEL", "Qwen/Qwen-Image-Edit")
-LORA_PATH = os.environ.get("LORA_PATH", "/root/lora_saves_edit/checkpoint-5000")
+LORA_PATH = os.environ.get("LORA_PATH", "")
 LORA_PATH = Path(LORA_PATH) if LORA_PATH else None
-if LORA_PATH and not LORA_PATH.exists():
-    print(f"WARNING: LORA_PATH {LORA_PATH} does not exist, running without LoRA")
-    LORA_PATH = None
+LORA_ADAPTER_NAME = os.environ.get("LORA_ADAPTER_NAME", "isometric")
+LORA_WEIGHT = float(os.environ.get("LORA_WEIGHT", "1.0"))
+
+# Require LoRA if LORA_PATH is specified but doesn't exist
+if LORA_PATH is None or not str(LORA_PATH).strip():
+    print("ERROR: LORA_PATH is not set. Please set LORA_PATH in .env file.")
+    print(f"Hint: Download LoRA weights from Oxen and set LORA_PATH to the weights directory.")
+    sys.exit(1)
+
+if not LORA_PATH.exists():
+    print(f"ERROR: LORA_PATH does not exist: {LORA_PATH}")
+    print(f"Please download LoRA weights and set the correct LORA_PATH in .env")
+    sys.exit(1)
+
 DTYPE = os.environ.get("DTYPE", "bfloat16")
 
 # FastAPI app
@@ -52,22 +73,27 @@ async def startup():
     print("Starting inference server...")
     print(f"  BASE_MODEL: {BASE_MODEL}")
     print(f"  LORA_PATH:  {LORA_PATH}")
+    print(f"  LORA_ADAPTER_NAME: {LORA_ADAPTER_NAME}")
+    print(f"  LORA_WEIGHT: {LORA_WEIGHT}")
     print(f"  DTYPE:      {DTYPE}")
     print("=" * 60)
 
     pipeline = QwenEditPipeline(
         base_model=BASE_MODEL,
         lora_path=str(LORA_PATH) if LORA_PATH else None,
+        lora_adapter_name=LORA_ADAPTER_NAME,
+        lora_weight=LORA_WEIGHT,
         dtype=DTYPE,
     )
 
     try:
         pipeline.load()
-        model_name = f"Qwen-IE + LoRA({LORA_PATH.name})" if LORA_PATH else "Qwen-IE base"
+        model_name = f"Qwen-IE + LoRA({LORA_PATH.name})"
         print(f"Model loaded: {model_name}")
     except Exception as e:
-        print(f"WARNING: Failed to load model: {e}")
-        print("Server will respond to /health but /edit will fail")
+        print(f"ERROR: Failed to load model with LoRA: {e}")
+        print("Server cannot start without valid LoRA weights.")
+        sys.exit(1)
 
 
 @app.post("/edit", response_model=EditResponse)
