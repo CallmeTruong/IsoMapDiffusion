@@ -56,7 +56,14 @@ class QwenEditPipeline:
                 "Please set LORA_PATH in .env to a valid LoRA weights directory."
             )
 
-        self.pipe.to(self.device)
+        # Sequential CPU offload must be enabled BEFORE .to(device) so model
+        # stays on CPU and only modules are streamed to GPU per inference step.
+        try:
+            self.pipe.enable_sequential_cpu_offload()
+            print("Sequential CPU offload enabled")
+        except Exception as e:
+            print(f"Could not enable sequential cpu offload: {e}")
+            self.pipe.to(self.device)
         print("Pipeline ready on", self.device)
 
     def edit(

@@ -1,25 +1,40 @@
 #!/usr/bin/env python3
 """
-Inference pipeline (inference-only).
+Inference pipeline (inference-only) - REFACTORED to use TemplateBuilder
+ported from isometric-nyc/infill_template.py.
 
-Loop through renders/, generate tiles via Qwen-Image-Edit + LoRA server,
-and save each tile to <output>/tile_<qx>_<qy>_<hash>.png (same regex as renders/).
+Loop through renders/, generate quadrants via Qwen-Image-Edit + LoRA server
+using quadrant-based template (TemplateBuilder), and save each TILE to
+<output>/tile_<qx>_<qy>_<hash>.png (same regex as renders/).
 
-Pipeline is split into 3 steps (server -> inference -> user-built DZI):
+Pipeline split (server -> inference -> user-built DZI):
   Step 1: uv run python -m inference.scripts.run_server --port 8000
   Step 2: uv run python -m inference.scripts.run_inference_pipeline --renders output/renders --output model_generate
   Step 3: uv run python -m inference.scripts.export_plan --input model_generate --output output/model_map_plan.json
           uv run python -m src.dzi.builder --input output/model_map_plan.json --output output/model_map
 
-This script does NOT call stitch_all() or export_dzi_plan() — those are done
-in step 3, which you run yourself.
+This script does NOT call stitch_all() or export_dzi_plan() -- those are
+done in step 3 (you run yourself).
+
+=== REFACTOR NOTES (vs old version) ===
+- find_neighbor_gen (1 neighbor, wrong direction) -> REPLACED by
+  scan_generated_set + make_has_generation (multi-neighbor, 4-connected)
+- build_template (left/right split) -> REPLACED by TemplateBuilder.build()
+  with has_generation/get_render/get_generation callables.
+- Each tile (qx_tile, qy_tile) is generated as a FULL 1024x1024
+  via 1 template build that infills the WHOLE 1024x1024 (mode=full).
+  Reason: 1 tile = 1 generation = 1 save, simpler.
+  Generated quadrants are saved in the same 1024x1024 file.
+- The user can switch to per-quadrant mode by setting --per-quadrant flag.
 """
+from __future__ import annotations
 
 import argparse
 import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -29,16 +44,34 @@ from typing import Optional
 
 import httpx
 from PIL import Image
+from dotenv import load_dotenv
 
-# Allow running as a module from project root
+# Load .env from project root
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_env_path = PROJECT_ROOT / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path)
+
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from inference.client import GenerationClient, OmniTemplateBuilder, TileTraversal
+from inference.client import (
+    GenerationClient,
+    TemplateBuilder,
+    InfillRegion,
+    TileTraversal,
+    scan_generated_set,
+    make_has_generation,
+    make_render_provider,
+    make_generation_provider,
+    crop_quadrant,
+)
+from inference.config import get_inference_config
 
+_cfg = get_inference_config()
 log = logging.getLogger("inference.pipeline")
 
+# Tile filename regex
 TILE_RE = re.compile(r"^tile_([+-]\d+)_([+-]\d+)_[a-f0-9]+\.png$")
 
 
@@ -46,7 +79,7 @@ def sign_int(n: int) -> str:
     return f"+{n}" if n >= 0 else str(n)
 
 
-def discover_tiles(renders_dir: Path) -> list[tuple[int, int]]:
+def discover_tiles(renders_dir: Path) -> list:
     """Parse tile coords from `tile_<qx>_<qy>_<hash>.png` filenames."""
     tiles = set()
     for f in renders_dir.glob("tile_+*_+*_*.png"):
@@ -61,7 +94,6 @@ def discover_tiles(renders_dir: Path) -> list[tuple[int, int]]:
 
 
 def load_state(state_path: Path) -> dict:
-    """Load .state.json. Returns empty dict on first run / corrupted file."""
     if not state_path.exists():
         return {"done": {}, "failed": {}}
     try:
@@ -78,7 +110,6 @@ def load_state(state_path: Path) -> dict:
 
 
 def save_state(state_path: Path, state: dict) -> None:
-    """Atomically write .state.json."""
     state_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = state_path.with_suffix(state_path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as f:
@@ -86,10 +117,9 @@ def save_state(state_path: Path, state: dict) -> None:
     tmp.replace(state_path)
 
 
-def scan_done_from_disk(gen_dir: Path) -> dict[str, str]:
-    """Re-scan gen_dir for already-saved tiles. Used at startup to recover
-    after a crash between save_generated() and save_state()."""
-    done: dict[str, str] = {}
+def scan_done_from_disk(gen_dir: Path) -> dict:
+    """Re-scan gen_dir for already-saved tiles."""
+    done: dict = {}
     if not gen_dir.exists():
         return done
     for f in gen_dir.glob("tile_+*_+*_*.png"):
@@ -106,7 +136,7 @@ def scan_done_from_disk(gen_dir: Path) -> dict[str, str]:
 
 
 def save_generated(img: Image.Image, qx: int, qy: int, out_dir: Path) -> Path:
-    """Save a generated tile as tile_<qx>_<qy>_<8hex>.png (same format as renders/)."""
+    """Save generated tile as tile_<qx>_<qy>_<8hex>.png (same format as renders/)."""
     bio = BytesIO()
     img.convert("RGB").save(bio, format="PNG", optimize=False)
     png_bytes = bio.getvalue()
@@ -117,47 +147,74 @@ def save_generated(img: Image.Image, qx: int, qy: int, out_dir: Path) -> Path:
     return out_path
 
 
-def find_neighbor_gen(
-    qx: int, qy: int, gen_dir: Path
-) -> tuple[Optional[Image.Image], Optional[str]]:
-    """Find a generated neighbor (4-connected) to use as context.
-
-    Returns (neighbor_image, side) where side ∈ {right, left, top, bottom}.
+def build_tile_template(
+    tile_qx: int,
+    tile_qy: int,
+    renders_dir: Path,
+    gen_dir: Path,
+    render_cache: dict,
+    generation_cache: dict,
+) -> Optional[tuple]:
     """
-    for dx, dy, side in [
-        (1, 0, "right"),
-        (-1, 0, "left"),
-        (0, 1, "bottom"),
-        (0, -1, "top"),
-    ]:
-        nqx, nqy = qx + dx, qy + dy
-        pattern = f"tile_{sign_int(nqx)}_{sign_int(nqy)}_*.png"
-        matches = list(gen_dir.glob(pattern))
-        if matches:
-            return Image.open(matches[0]).convert("RGB"), side
-    return None, None
+    Build template cho 1 TILE (qx, qy) su dung TemplateBuilder.
+
+    Moi tile (qx, qy) = 2x2 quadrants bat dau tu (qx*2, qy*2) trong quadrant
+    coords. Day la approach "full tile" (region = 1024x1024 = toan bo tile).
+
+    Returns:
+        (template_image, placement) hoac None neu khong co placement hop le.
+    """
+    # Full-tile infill region (1024x1024) cho tile (tile_qx, tile_qy)
+    region = InfillRegion.full_tile(tile_qx, tile_qy)
+
+    # has_generation: kiem tra 4 quadrants cua tile da co generation chua
+    generated_set = scan_generated_set(gen_dir)
+    has_gen = make_has_generation(generated_set)
+
+    # get_render: load render 1024x1024 cua tile, crop 512x512 quadrant
+    get_render = make_render_provider(renders_dir, render_cache)
+
+    # get_generation: load generation 1024x1024 cua tile, crop 512x512 quadrant
+    get_generation = make_generation_provider(gen_dir, generation_cache)
+
+    builder = TemplateBuilder(
+        infill_region=region,
+        has_generation=has_gen,
+        get_render=get_render,
+        get_generation=get_generation,
+    )
+    result = builder.build(border_width=_cfg.border_width)
+    return result
 
 
-def build_template(
-    builder: OmniTemplateBuilder,
-    render: Image.Image,
-    neighbor_gen: Optional[Image.Image],
-    neighbor_side: Optional[str],
-) -> tuple[Image.Image, str]:
-    """Build the template image for the model. Returns (template, mode)."""
-    if neighbor_gen is not None and neighbor_side is not None:
-        template = builder.create_next_tile_template(
-            generated_tile=neighbor_gen,
-            next_render=render,
-            side=neighbor_side,
-        )
-        return template, f"next:{neighbor_side}"
-    template = builder.create_full_template(render)
-    return template, "full"
+def build_quadrant_template(
+    qx: int, qy: int, renders_dir: Path, gen_dir: Path,
+    render_cache: dict, generation_cache: dict,
+) -> Optional[tuple]:
+    """
+    Build template cho 1 QUADRANT (qx, qy) (512x512).
+
+    Per-quadrant mode: gen 1 quadrant = 1 cuoc goi model. Useful cho fine-grained
+    seam control nhung cham hon 4x so voi full-tile mode.
+
+    Returns:
+        (template_image, placement) hoac None neu khong co placement hop le.
+    """
+    region = InfillRegion.from_quadrant(qx, qy)
+    generated_set = scan_generated_set(gen_dir)
+    has_gen = make_has_generation(generated_set)
+    get_render = make_render_provider(renders_dir, render_cache)
+    get_generation = make_generation_provider(gen_dir, generation_cache)
+    builder = TemplateBuilder(
+        infill_region=region,
+        has_generation=has_gen,
+        get_render=get_render,
+        get_generation=get_generation,
+    )
+    return builder.build(border_width=_cfg.border_width)
 
 
 async def wait_for_server(client: GenerationClient, timeout_s: float = 300.0) -> None:
-    """Block until the server reports model_loaded=True, or raise."""
     log.info("Waiting for server at %s ...", client.base_url)
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -176,26 +233,84 @@ async def wait_for_server(client: GenerationClient, timeout_s: float = 300.0) ->
 
 async def generate_tile(
     client: GenerationClient,
-    builder: OmniTemplateBuilder,
     render_path: Path,
     gen_dir: Path,
     prompt: str,
     qx: int,
     qy: int,
     concurrency_sem: asyncio.Semaphore,
-) -> tuple[bool, Optional[str], Optional[Path]]:
-    """Generate a single tile. Returns (success, mode, saved_path)."""
+    per_quadrant: bool = False,
+) -> tuple:
+    """
+    Generate 1 tile (or 1 quadrant) su dung TemplateBuilder moi.
+
+    Returns:
+        (success, mode, saved_path_or_error)
+    """
     async with concurrency_sem:
         try:
-            render = Image.open(render_path).convert("RGB")
-            neighbor_gen, neighbor_side = find_neighbor_gen(qx, qy, gen_dir)
-            template, mode = build_template(
-                builder, render, neighbor_gen, neighbor_side
-            )
-            log.debug("[%d,%d] template mode=%s", qx, qy, mode)
-            result_img = await client.edit(template, prompt)
-            out_path = save_generated(result_img, qx, qy, gen_dir)
-            return True, mode, out_path
+            render_cache: dict = {}
+            generation_cache: dict = {}
+
+            if per_quadrant:
+                # Per-quadrant mode: 4 cuoc goi model / tile
+                saved_paths = []
+                # Order: tl, tr, bl, br
+                for ox, oy in [(0, 0), (1, 0), (0, 1), (1, 1)]:
+                    qqx, qqy = qx * 2 + ox, qy * 2 + oy
+                    result = build_quadrant_template(
+                        qqx, qqy,
+                        render_path.parent, gen_dir,
+                        render_cache, generation_cache,
+                    )
+                    if result is None:
+                        return False, f"quadrant-{ox}-{oy}", "no valid placement"
+                    template, placement = result
+                    # Gen 1 quadrant
+                    gen_img = await client.edit(template, prompt)
+                    # Lay quadrant tu result
+                    result_quadrant = crop_quadrant(
+                        gen_img.resize(
+                            (_cfg.tile_size_px, _cfg.tile_size_px),
+                            Image.Resampling.LANCZOS,
+                        ),
+                        qqx, qqy,
+                    )
+                    saved_paths.append(((qqx, qqy), result_quadrant, placement))
+
+                # Stitch 4 quadrants thanh 1 tile 1024x1024
+                tile_img = Image.new(
+                    "RGB", (_cfg.tile_size_px, _cfg.tile_size_px), (0, 0, 0)
+                )
+                for (qqx, qqy), quad_img, _pl in saved_paths:
+                    left = (qqx % 2) * _cfg.quadrant_size_px
+                    top = (qqy % 2) * _cfg.quadrant_size_px
+                    tile_img.paste(quad_img, (left, top))
+                out_path = save_generated(tile_img, qx, qy, gen_dir)
+                return True, "per-quadrant", out_path
+            else:
+                # Full-tile mode (default): 1 cuoc goi model / tile
+                # NOTE: pass renders_dir (parent of render_path) for provider
+                result = build_tile_template(
+                    qx, qy,
+                    render_path.parent, gen_dir,
+                    render_cache, generation_cache,
+                )
+                if result is None:
+                    # Full-tile validation failed (co generated neighbor ben ngoai).
+                    # Fallback: gen theo quadrant.
+                    log.info(
+                        "[%d,%d] full-tile failed, fallback to per-quadrant",
+                        qx, qy,
+                    )
+                    return await generate_tile(
+                        client, render_path, gen_dir, prompt,
+                        qx, qy, concurrency_sem, per_quadrant=True,
+                    )
+                template, placement = result
+                gen_img = await client.edit(template, prompt)
+                out_path = save_generated(gen_img, qx, qy, gen_dir)
+                return True, f"full-tile@{placement.infill_x},{placement.infill_y}", out_path
         except (httpx.HTTPError, httpx.RequestError, OSError) as e:
             return False, None, e
         except Exception as e:
@@ -213,6 +328,9 @@ async def run(args: argparse.Namespace) -> None:
     log.info("output   : %s", gen_dir)
     log.info("state    : %s", state_path)
     log.info("endpoint : %s", args.endpoint)
+    log.info("mode     : %s", "per-quadrant" if args.per_quadrant else "full-tile")
+    log.info("config   : tile=%dpx, quadrant=%dpx, border_w=%d",
+             _cfg.tile_size_px, _cfg.quadrant_size_px, _cfg.border_width)
 
     # Discover tiles
     tiles = discover_tiles(renders_dir)
@@ -221,7 +339,7 @@ async def run(args: argparse.Namespace) -> None:
         return
     log.info("Discovered %d tiles.", len(tiles))
 
-    # Load state (resume support)
+    # Load state
     state = load_state(state_path) if args.resume else {"done": {}, "failed": {}}
     on_disk_done = scan_done_from_disk(gen_dir)
     for key, fname in on_disk_done.items():
@@ -240,8 +358,12 @@ async def run(args: argparse.Namespace) -> None:
     log.info("%d tiles remaining to generate.", len(pending))
 
     # Server + builder
-    client = GenerationClient(args.endpoint, timeout=args.timeout)
-    builder = OmniTemplateBuilder(tile_size=args.tile_size)
+    client = GenerationClient(
+        args.endpoint,
+        timeout=args.timeout,
+        default_steps=_cfg.default_steps,
+        default_guidance=_cfg.default_guidance,
+    )
     await wait_for_server(client, timeout_s=args.server_wait)
     sem = asyncio.Semaphore(args.concurrency)
 
@@ -260,7 +382,7 @@ async def run(args: argparse.Namespace) -> None:
     last_save = started
     completed = len(state["done"])
     failed = 0
-    last_modes: dict[str, int] = {}
+    last_modes: dict = {}
 
     # Main loop
     while not traversal.is_complete:
@@ -270,7 +392,6 @@ async def run(args: argparse.Namespace) -> None:
         for qx, qy in batch:
             key = f"{qx},{qy}"
             if key in state["done"]:
-                # Already done on a previous run; skip silently
                 traversal.mark_done(qx, qy)
                 continue
             render_files = list(
@@ -286,13 +407,13 @@ async def run(args: argparse.Namespace) -> None:
 
             ok, mode, result = await generate_tile(
                 client,
-                builder,
                 render_path,
                 gen_dir,
                 args.prompt,
                 qx,
                 qy,
                 sem,
+                per_quadrant=args.per_quadrant,
             )
             if ok:
                 assert isinstance(result, Path)
@@ -311,7 +432,6 @@ async def run(args: argparse.Namespace) -> None:
                 traversal.mark_failed(qx, qy)
                 log.warning("[%d,%d] FAIL  err=%s", qx, qy, result)
 
-            # Save state periodically
             now = time.monotonic()
             if now - last_save >= args.state_save_interval:
                 save_state(state_path, state)
@@ -331,7 +451,6 @@ async def run(args: argparse.Namespace) -> None:
     if last_modes:
         log.info("  modes     : %s", last_modes)
 
-    # Final hand-off hint (no stitch / no DZI here)
     log.info("Next step (run yourself):")
     log.info("  uv run python -m inference.scripts.export_plan \\")
     log.info("      --input  %s \\", gen_dir)
@@ -352,16 +471,16 @@ def parse_args() -> argparse.Namespace:
                    help="Path to renders/ directory (input).")
     p.add_argument("--output", type=str, required=True,
                    help="Path to gen output dir (each tile saved as tile_<qx>_<qy>_<hash>.png).")
-    p.add_argument("--endpoint", type=str, default="http://localhost:8000",
-                   help="Inference server URL.")
+    p.add_argument("--endpoint", type=str, default=_cfg.endpoint,
+                   help=f"Inference server URL (default: {_cfg.endpoint}).")
     p.add_argument("--prompt", type=str, default=None,
-                   help="Edit prompt (default: from src.constants.DEFAULT_PROMPT).")
+                   help=f"Edit prompt (default: from src.constants.DEFAULT_PROMPT).")
     p.add_argument("--concurrency", type=int, default=1,
                    help="Max in-flight requests (default: 1; bump to 2 if VRAM allows).")
     p.add_argument("--batch-size", type=int, default=1,
                    help="Tiles per traversal batch (default: 1, strict BFS).")
-    p.add_argument("--tile-size", type=int, default=1024,
-                   help="Tile size in pixels (default: 1024).")
+    p.add_argument("--tile-size", type=int, default=_cfg.tile_size_px,
+                   help=f"Tile size in pixels (default: {_cfg.tile_size_px} from config).")
     p.add_argument("--timeout", type=int, default=300,
                    help="HTTP timeout per request in seconds (default: 300).")
     p.add_argument("--server-wait", type=float, default=300.0,
@@ -372,6 +491,8 @@ def parse_args() -> argparse.Namespace:
                    help="State filename inside --output (default: .state.json).")
     p.add_argument("--state-save-interval", type=float, default=15.0,
                    help="Seconds between state flushes (default: 15).")
+    p.add_argument("--per-quadrant", action="store_true",
+                   help="Use per-quadrant mode (4 calls/tile, finer seam control).")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="Verbose logging.")
     return p.parse_args()
@@ -384,18 +505,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     if args.prompt is None:
-        # Lazy import to avoid hard dependency
-        try:
-            from src.constants import DEFAULT_PROMPT
-
-            args.prompt = DEFAULT_PROMPT
-        except ImportError:
-            args.prompt = (
-                "Fill in the outlined section with coherent pixels matching the "
-                "<isometric pixel art> style, seamlessly blending edges with "
-                "surrounding areas, maintaining consistent isometric perspective, "
-                "shadow direction, lighting, pixel density, and color harmony."
-            )
+        args.prompt = _cfg.default_prompt
     asyncio.run(run(args))
 
 
