@@ -1,0 +1,38 @@
+# Default configuration for inference server
+
+model:
+  # Base model from HuggingFace
+  base: "Qwen/Qwen-Image-Edit"
+
+  # Path to LoRA weights (relative to project root or absolute)
+  lora_path: "./lora-weights/isometric"
+
+  # LoRA rank (must match training config)
+  rank: 16
+
+  # Data type: bfloat16, float16, float32
+  dtype: "bfloat16"
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+
+  # Request timeout in seconds
+  timeout: 300
+
+  # CORS allowed origins (comma-separated)
+  cors_origins: "*"
+
+generation:
+  # Default inference parameters
+  default_steps: 14
+  default_guidance: 3.0
+  default_true_cfg: 2.0
+  default_seed: null  # null = random
+
+  # Retry settings
+  max_retries: 3
+  retry_delay: 5
+
+logging:
+  level: "INFO"
