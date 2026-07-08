@@ -288,8 +288,7 @@ window.analyzeCanvas = function() {
   const blankVarThr        = ${cfg.blankVarianceThr};
   const blankEdgeThr       = ${cfg.blankEdgeThr ?? 0.15};
   const blankMeanRThr      = ${TILE.blankMeanRThr};
-  const cornerWhiteThr     = ${RENDER.placeholderCornerWhiteThr};
-  const cornerDarkThr      = ${RENDER.placeholderCornerDarkThr};
+  const cornerWhiteThr     = 250;
   const topStripMeanRThr   = 240;
   const topStripVarThr     = 1500;
   const isLowVar           = variance < blankVarThr;
@@ -326,8 +325,8 @@ window.analyzeCanvas = function() {
   // small and centered, so the four corners are *always* pure background.
   // Real photorealistic terrain essentially never lands all 4 corners in
   // this narrow, specific color range simultaneously.
-  const PLACEHOLDER_BG = { r: ${RENDER.googlePlaceholderBg.r}, g: ${RENDER.googlePlaceholderBg.g}, b: ${RENDER.googlePlaceholderBg.b} };
-  const PLACEHOLDER_TOL = ${RENDER.googlePlaceholderTol};
+  const PLACEHOLDER_BG = { r: 212, g: 206, b: 198 };
+  const PLACEHOLDER_TOL = 12;
   const isPlaceholderColor = s =>
     Math.abs(s.r - PLACEHOLDER_BG.r) <= PLACEHOLDER_TOL &&
     Math.abs(s.g - PLACEHOLDER_BG.g) <= PLACEHOLDER_TOL &&

@@ -1,39 +1,39 @@
+import RBush from 'rbush';
+import * as turf from '@turf/turf';
+
 /**
- * utils/geo.mjs — Geographic & angular math helpers
- *
- * Centralized so call-sites never see raw Math.PI / 180, 111111, 2π, etc.
- * All values come from src/config.mjs (GEO.*), with env-var / JSON-overlay
- * overrides applied via the standard config load pipeline.
- *
- * Pure module: no I/O, no side effects.
+ * Build a spatial index (rbush) from GeoJSON features.
+ * Returns a wrapper object that mimics the search() response format
+ * with .features array.
+ * 
+ * @param {Array} features - Array of GeoJSON features
+ * @returns {{ search: Function, features: Array }} - Searchable index and original features
  */
+export function buildSpatialIndex(features) {
+  const tree = new RBush();
 
-import { GEO } from '../config.mjs';
+  const bboxItems = features.map((feature, idx) => {
+    const bbox = turf.bbox(feature);
+    return {
+      minX: bbox[0],
+      minY: bbox[1],
+      maxX: bbox[2],
+      maxY: bbox[3],
+      properties: { _idx: idx, ...feature.properties }
+    };
+  });
 
-export const DEG_TO_RAD       = GEO.degToRad;
-export const RAD_TO_DEG       = GEO.radToDeg;
-export const TWO_PI           = GEO.twoPi;
-export const M_PER_DEG_LAT    = GEO.mPerDegLat;
-export const EARTH_CIRC_M     = GEO.earthCircumferenceM;
-export const MERCATOR_LAT_MAX = GEO.mercatorLatClipDeg;
-export const SLIPPY_MIN_ZOOM  = GEO.minZoom;
-export const SLIPPY_MAX_ZOOM  = GEO.maxZoom;
+  tree.load(bboxItems);
 
-export const degToRad = (d) => d * DEG_TO_RAD;
-export const radToDeg = (r) => r * RAD_TO_DEG;
+  const search = (bbox) => {
+    const results = tree.search({
+      minX: Array.isArray(bbox) ? bbox[0] : bbox.minX,
+      minY: Array.isArray(bbox) ? bbox[1] : bbox.minY,
+      maxX: Array.isArray(bbox) ? bbox[2] : bbox.maxX,
+      maxY: Array.isArray(bbox) ? bbox[3] : bbox.maxY,
+    });
+    return { features: results };
+  };
 
-export function mPerDegLng(latDeg) {
-  return M_PER_DEG_LAT * Math.cos(latDeg * DEG_TO_RAD);
-}
-
-export function clampMercatorLat(lat) {
-  return Math.max(-MERCATOR_LAT_MAX, Math.min(MERCATOR_LAT_MAX, lat));
-}
-
-export function slippyScale(z) {
-  return Math.pow(2, z);
-}
-
-export function clampSlippyZ(z) {
-  return Math.max(SLIPPY_MIN_ZOOM, Math.min(SLIPPY_MAX_ZOOM, z));
+  return { search, features };
 }

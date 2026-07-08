@@ -19,7 +19,7 @@ from .omni import (
     STRIP_TYPES,
     TYPE_RECT_INFILL,
 )
-from .prepare import DatasetPreparator, TrainingSample
+from .prepare import DatasetPreparator, TrainingSample, main
 
 __all__ = [
     'OmniMasker',
@@ -43,4 +43,5 @@ __all__ = [
     'TYPE_RECT_INFILL',
     'DatasetPreparator',
     'TrainingSample',
+    'main',
 ]

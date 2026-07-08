@@ -78,7 +78,7 @@ class PathsConfig:
     infra: str = "./geo/infra.geojson"
     output: str = "./output"
     renders: str = "./output/renders"
-    generate: str = "./generate"
+    generate: str = "./generate_sample"
     lora_dataset: str = "./lora_dataset"
     meta: str = "meta"
 

@@ -10,7 +10,6 @@
 import sharp from 'sharp';
 import { TILE, GEO, STITCH } from '../../config.mjs';
 import { savePng } from './io.mjs';
-import { mPerDegLng, M_PER_DEG_LAT } from '../../utils/geo.mjs';
 
 const DEFAULT_BG = STITCH.background;
 
@@ -21,19 +20,19 @@ const DEFAULT_BG = STITCH.background;
  * @param {Array<{lat: number, lng: number, png: Buffer|string|sharp.Sharp}>} opts.tiles
  * @param {string} opts.outPath
  * @param {{r,g,b,alpha}} [opts.background]
- * @param {number} [opts.padding] - Padding px xung quanh map (default STITCH.worldPaddingPx)
+ * @param {number} [opts.padding=100] - Padding px xung quanh map
  * @returns {Promise<{outPath, size, mapW, mapH, placements}>}
  */
-export async function stitchWorld({ tiles, outPath, background, padding }) {
+export async function stitchWorld({ tiles, outPath, background, padding = 100 }) {
   if (!Array.isArray(tiles) || tiles.length === 0) {
     throw new Error('stitchWorld: tiles must be a non-empty array');
   }
 
   const bg = background ?? DEFAULT_BG;
-  const _px = TILE.sizePx;                                // 1024
-  const _m  = TILE.tileWorldSizeM;                        // world width mỗi tile
-  const PX_PER_M = _px / _m;
-  const padPx = padding ?? STITCH.worldPaddingPx;
+  const _px = TILE.sizePx;                            // 1024
+  const _m  = 200;                                    // world width mỗi tile (giống CELL_SIZE_M)
+  const PX_PER_M = _px / _m;                          // 5.12 px/m
+  const mPerDegLat = GEO.mPerDegLat;                  // 111111
 
   // 1. Tính bounding box world
   let minLat = Infinity, maxLat = -Infinity;
@@ -45,18 +44,18 @@ export async function stitchWorld({ tiles, outPath, background, padding }) {
     if (t.lng > maxLng) maxLng = t.lng;
   }
 
-  const mPerDegLngAtMid = mPerDegLng((minLat + maxLat) / 2);
-  const widthM  = (maxLng - minLng) * mPerDegLngAtMid + _m;
-  const heightM = (maxLat - minLat) * M_PER_DEG_LAT + _m;
-  const mapW = Math.ceil(widthM * PX_PER_M) + 2 * padPx;
-  const mapH = Math.ceil(heightM * PX_PER_M) + 2 * padPx;
+  const mPerDegLng = GEO.mPerDegLat * Math.cos((minLat + maxLat) / 2 * Math.PI / 180);
+  const widthM  = (maxLng - minLng) * mPerDegLng + _m;
+  const heightM = (maxLat - minLat) * mPerDegLat + _m;
+  const mapW = Math.ceil(widthM * PX_PER_M) + 2 * padding;
+  const mapH = Math.ceil(heightM * PX_PER_M) + 2 * padding;
 
   // 2. Tile → pixel offset (Y đảo vì screen Y hướng xuống, world North lên trên)
   const placements = [];
   const composites = [];
   for (const t of tiles) {
-    const dx = Math.round((t.lng - minLng) * mPerDegLngAtMid * PX_PER_M) + padPx;
-    const dy = Math.round((maxLat - t.lat) * M_PER_DEG_LAT * PX_PER_M) + padPx;
+    const dx = Math.round((t.lng - minLng) * mPerDegLng * PX_PER_M) + padding;
+    const dy = Math.round((maxLat - t.lat) * mPerDegLat * PX_PER_M) + padding;
     placements.push({ lat: t.lat, lng: t.lng, dx, dy });
     composites.push({ input: t.png, left: dx, top: dy });
   }

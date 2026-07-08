@@ -15,7 +15,6 @@ import { filterPendingTiles, sortPendingByPriority } from './quality.mjs';
 import { saveTile, clearTileDeletedMarker } from './tile_io.mjs';
 import { getProvider } from './provider/index.mjs';
 import { renderFallback2D } from './fallback_2d.mjs';
-import { TILE } from '../config.mjs';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -34,14 +33,16 @@ function createCleanup(tmpHtml, userDataDir) {
   };
 }
 
-
+/**
+ * Render one tile and save as 1 file (1024×1024).
+ */
 async function renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blankSizeKb, maxRetry, parentPort, workerId) {
 
   const { lat, lng } = tileIndexToLatLng(tile.qx, tile.qy, seedLat, seedLng, cfg);
 
   const fbEnabled = !!cfg?.fallback?.enabled;
   const effectiveMaxRetry = fbEnabled
-    ? Math.min(maxRetry, cfg.fallback.maxRetries3D ?? 3)
+    ? Math.min(maxRetry, cfg.fallback.maxRetries3D ?? 1)
     : maxRetry;
 
   for (let attempt = 0; attempt < effectiveMaxRetry; attempt++) {
@@ -57,7 +58,7 @@ async function renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blank
       if (analysis.isBlank) {
         if (attempt < effectiveMaxRetry - 1) continue;
         if (fbEnabled) {
-          return { ok: false, isBlank: true, error: `Blank after ${effectiveMaxRetry} 3D attempts (placeholder=${!!analysis.isGooglePlaceholder})`, retries: attempt };
+          return { ok: false, isBlank: true, error: 'Blank tile (will fallback)', retries: attempt };
         }
         throw new Error('Blank tile');
       }
@@ -66,7 +67,6 @@ async function renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blank
       const buf = Buffer.from(tileDataUrl.split(',')[1], 'base64');
 
       const result = saveTile(buf, { qx: tile.qx, qy: tile.qy }, {
-        source: '3D',
         lat, lng,
         cameraAzimuth: cfg.azimuth,
         cameraElevation: cfg.elevation,
@@ -82,6 +82,12 @@ async function renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blank
         seedLat, seedLng,
       }, outputDir);
 
+      // Mark quadrant boundaries (single cell) for downstream stitching
+      parentPort?.postMessage({
+        type: 'db_update', qx: tile.qx, qy: tile.qy,
+        info: { workerId, variance: analysis.variance, renderMs },
+      });
+
       if (result.sizeKB >= blankSizeKb) {
         clearTileDeletedMarker(outputDir, tile.qx, tile.qy);
       } else {
@@ -93,6 +99,11 @@ async function renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blank
       return { ok: true, retries: attempt, ...result, variance: analysis.variance, renderMs };
     } catch (e) {
       if (attempt === effectiveMaxRetry - 1) {
+        parentPort?.postMessage({
+          type: 'db_update',
+          qx: tile.qx, qy: tile.qy,
+          info: { workerId, error: e.message },
+        });
         return { ok: false, error: e.message, retries: attempt };
       }
     }
@@ -179,10 +190,10 @@ export async function runWorker(workerData) {
     const p = await browser.newPage();
     p.on('console', m => { if (m.type() === 'error') report('[Browser] ' + m.text()); });
     await p.setViewport({ width: cfg.sizePx, height: cfg.sizePx, deviceScaleFactor: 1 });
-    await p.goto(fileUrl, { waitUntil: 'domcontentloaded', timeout: TILE.createPageTimeoutMs });
-    await p.waitForFunction('typeof window.renderTile === "function"', { timeout: TILE.waitFunctionTimeoutMs });
-    await p.waitForFunction('window.isSessionOk()', { timeout: TILE.waitFunctionTimeoutMs, polling: TILE.waitPollMs });
-    await sleep(TILE.sessionWarmupMs);
+    await p.goto(fileUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    await p.waitForFunction('typeof window.renderTile === "function"', { timeout: 30_000 });
+    await p.waitForFunction('window.isSessionOk()', { timeout: 30_000, polling: 200 });
+    await sleep(2000);
     return p;
   }
 
@@ -212,7 +223,7 @@ export async function runWorker(workerData) {
   let errLogBuffer = '';
   let pageReady = true;
 
-  const MAX_PAGE_RECOVERIES = TILE.maxPageRecoveries; // per tile, if the browser session dies mid-render
+  const MAX_PAGE_RECOVERIES = 3; // per tile, if the browser session dies mid-render
 
   async function attemptFallbackNow(tile) {
     if (!cfg?.fallback?.enabled) {

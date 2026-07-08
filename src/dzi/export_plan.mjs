@@ -1,14 +1,13 @@
 import fs from 'fs';
 import path from 'path';
-import { TILE, DZI } from '../config.mjs';
+import { TILE, GEO } from '../config.mjs';
 
-export async function exportWorldLayoutPlan({ tiles, outJsonPath, padding }) {
+export async function exportWorldLayoutPlan({ tiles, outJsonPath, padding = 100 }) {
   if (!Array.isArray(tiles) || tiles.length === 0) {
     throw new Error('exportWorldLayoutPlan: tiles must be a non-empty array');
   }
 
   const stepPx = TILE.sizePx * TILE.cameraMoveStep;
-  const padPx = padding ?? DZI.paddingPx;
 
   // Parse qx, qy
   function parseQxy(tilePath) {
@@ -30,8 +29,8 @@ export async function exportWorldLayoutPlan({ tiles, outJsonPath, padding }) {
   }
 
   // 2. Canvas size
-  const mapW = (maxQx - minQx + 1) * stepPx + 2 * padPx;
-  const mapH = (maxQy - minQy + 1) * stepPx + 2 * padPx;
+  const mapW = (maxQx - minQx + 1) * stepPx + 2 * padding;
+  const mapH = (maxQy - minQy + 1) * stepPx + 2 * padding;
 
   const layoutPlan = { canvasWidth: mapW, canvasHeight: mapH, tiles: [] };
 
@@ -40,8 +39,8 @@ export async function exportWorldLayoutPlan({ tiles, outJsonPath, padding }) {
     if (!t.path) throw new Error(`Tile missing 'path'`);
     const { qx, qy } = parseQxy(t.path);
 
-    const dx = (qx - minQx) * stepPx + padPx;
-    const dy = (maxQy - qy) * stepPx + padPx;
+    const dx = (qx - minQx) * stepPx + padding;
+    const dy = (maxQy - qy) * stepPx + padding;
 
     layoutPlan.tiles.push({ path: t.path, x: dx, y: dy });
   }

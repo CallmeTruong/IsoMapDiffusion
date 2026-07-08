@@ -1,16 +1,15 @@
 import fs from 'fs';
 import path from 'path';
 
-import { TILE, TILE_SIZE_M, QUADRANT_M, PATHS } from '../config.mjs';
+import { TILE, TILE_SIZE_M, QUADRANT_M, CELL_SIZE_M, PATHS } from '../config.mjs';
 import { findTile, listTiles, tileBounds } from '../tile/tile_io.mjs';
 import { tileIndexToLatLng } from '../tile/coords.mjs';
-import { degToRad } from '../utils/geo.mjs';
 
 /**
  * Build rotated polygon
  */
 function buildRotatedPolygon(qx, qy, seedLat, seedLng, cfg) {
-  const headingRad = degToRad(cfg.azimuth);
+  const headingRad = cfg.azimuth * Math.PI / 180;
   const cosH = Math.cos(headingRad);
   const sinH = Math.sin(headingRad);
   const cellToTileStep = 1 / cfg.cameraMoveStep;
@@ -64,8 +63,7 @@ export function buildQuadrantsGeojson({ quadrantStatus, outputDir, seedLat, seed
       seed_lat: seedLat,
       seed_lng: seedLng,
       quadrant_size_m: QUADRANT_M,
-      tile_step: TILE.cameraMoveStep,
-      camera_move_step: TILE.cameraMoveStep,
+      tile_step: TILE.tileStep,
       heading: cfg.azimuth,
       pitch: cfg.elevation,
       altitude: cfg.altitude,

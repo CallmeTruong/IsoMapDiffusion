@@ -1,18 +1,17 @@
 import sharp from 'sharp';
-import { XAXIS, TILE } from '../../config.mjs';
+import { XAXIS } from '../../config.mjs';
 import { mseRaw, mirrorHorizontal } from './compare.mjs';
 
-const DEFAULT_OVERLAP        = XAXIS.overlap;
-const DEFAULT_SAMPLE_HEIGHT  = XAXIS.sampleHeight;
-const DEFAULT_RESIZE_WIDTH   = XAXIS.resizeWidth;
+const DEFAULT_OVERLAP       = XAXIS.overlap;
+const DEFAULT_SAMPLE_HEIGHT = XAXIS.sampleHeight;
+const DEFAULT_RESIZE_WIDTH  = XAXIS.resizeWidth;
 const DEFAULT_RATIO_THRESHOLD = XAXIS.ratioThreshold;
-const HIGH_CONF_RATIO        = XAXIS.highConfRatio;
-const MEDIUM_CONF_RATIO      = XAXIS.mediumConfRatio;
-const DEFAULT_TILE_SIZE      = TILE.sizePx;
+const HIGH_CONF_RATIO  = XAXIS.highConfRatio;
+const MEDIUM_CONF_RATIO = XAXIS.mediumConfRatio;
 
 
 async function extractOverlapPair(tileA, tileB, opts = {}) {
-  const tileSize = opts.tileSize ?? DEFAULT_TILE_SIZE;
+  const tileSize = opts.tileSize ?? 1024;
   const overlap  = opts.overlap ?? DEFAULT_OVERLAP;
   const resizeW  = opts.resizeWidth ?? DEFAULT_RESIZE_WIDTH;
   const sampleH  = opts.sampleHeight ?? DEFAULT_SAMPLE_HEIGHT;
@@ -42,7 +41,7 @@ async function extractOverlapPair(tileA, tileB, opts = {}) {
 }
 
 
-export async function detectXAxisSign({ tileLeft, tileRight, tileSize = DEFAULT_TILE_SIZE, overlap = DEFAULT_OVERLAP }) {
+export async function detectXAxisSign({ tileLeft, tileRight, tileSize = 1024, overlap = DEFAULT_OVERLAP }) {
   const pair = await extractOverlapPair(tileLeft, tileRight, { tileSize, overlap });
   const { left, right, width, height } = pair;
 
@@ -73,7 +72,7 @@ export async function detectXAxisSign({ tileLeft, tileRight, tileSize = DEFAULT_
 }
 
 
-export async function detectXAxisSignFromPairs({ pairs, tileSize = DEFAULT_TILE_SIZE, overlap = DEFAULT_OVERLAP }) {
+export async function detectXAxisSignFromPairs({ pairs, tileSize = 1024, overlap = DEFAULT_OVERLAP }) {
   const details = [];
   for (const p of pairs) {
     const r = await detectXAxisSign({

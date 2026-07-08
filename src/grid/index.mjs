@@ -1,8 +1,7 @@
 import * as turf from '@turf/turf';
 import fs from 'fs';
 import path from 'path';
-import { buildSpatialIndex } from '../utils/spatial_index.mjs';
-import { mPerDegLng, M_PER_DEG_LAT } from '../utils/geo.mjs';
+import { buildSpatialIndex } from '../utils/geo.mjs';
 import { hasLand } from '../utils/sampling.mjs';
 import { GRID } from '../config.mjs';
 
@@ -202,9 +201,9 @@ export async function generateGrid(options = {}) {
       const cellBBox = turf.bbox(cell);
       const [lng, lat] = turf.centroid(cell).geometry.coordinates;
 
-      const cosLat = mPerDegLng(cityBBox[3]) / M_PER_DEG_LAT;
-      const cellSizeDegLng = (cellSizeKm * 1000) / (M_PER_DEG_LAT * cosLat);
-      const cellSizeDegLat = (cellSizeKm * 1000) / M_PER_DEG_LAT;
+      const cosLat = Math.cos(cityBBox[3] * Math.PI / 180);
+      const cellSizeDegLng = (cellSizeKm * 1000) / (111111 * cosLat);
+      const cellSizeDegLat = (cellSizeKm * 1000) / 111111;
       const originX = cityBBox[0];
       const originY = cityBBox[3];
 
@@ -271,11 +270,13 @@ export async function generateGrid(options = {}) {
   // Snapshot seed point FIRST (stable across runs unless input changes)
   // seed = (cityBBox min + max) / 2 → independent of which cells are classified
   const seed = {
-    seed_lat: (cityBBox[1] + cityBBox[3]) / 2,
+    seed_lat: cityBBox[1] < cityBBox[3]
+      ? (cityBBox[1] + cityBBox[3]) / 2
+      : (cityBBox[3] + cityBBox[1]) / 2,
     seed_lng: (cityBBox[0] + cityBBox[2]) / 2,
     city_bbox: cityBBox,
     cell_size_km: cellSizeKm,
-    tile_size_m: cellSizeKm * 1000 * GRID.cellsPerTile,
+    tile_size_m: cellSizeKm * 1000 * 2,
     quadrant_m: cellSizeKm * 1000,
     created_at: new Date().toISOString(),
     config: {
