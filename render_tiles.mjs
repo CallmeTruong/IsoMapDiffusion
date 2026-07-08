@@ -8,7 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = __dirname;
 
 import { TILE, TILE_SIZE_M, CELL_SIZE_M, WORKERS, PATHS, GOOGLE, TMP, CHECKPOINT, PROVIDERS, FALLBACK, resolvePath } from './src/config.mjs';
-import { getGoogleKeys, parseArgs } from './src/config.mjs';
+import { parseArgs } from './src/config.mjs';
 import {
   loadEnv, resolveNumWorkers, buildRenderCfg, getProvider, resolveApiKey,
   chunkArray, exportRenderOutputs,
@@ -16,7 +16,6 @@ import {
 import {
   computeSeedPoint, cellsToQuadrants, computeTiles,
   filterPendingTiles, sortPendingByPriority,
-  initDB, insertOrIgnoreQuadrant, updateQuadrantAttempt,
   loadCheckpoint, saveCheckpoint, CheckpointTracker, isTileFullyRendered,
 } from './src/tile/index.mjs';
 
@@ -30,7 +29,6 @@ const PROVIDER = getProvider(PROVIDER_ID);
 const API_KEY = resolveApiKey(PROVIDER_ID, ARGS['api-key']);
 const MANIFEST_FILE = ARGS.manifest ?? resolvePath('manifest');
 const OUTPUT_DIR    = ARGS.output   ?? resolvePath('renders');
-const DB_PATH       = ARGS.db       ?? resolvePath('db');
 
 const NUM_WORKERS = resolveNumWorkers(ARGS.workers);
 const RENDER_CFG  = buildRenderCfg(ARGS);
@@ -105,19 +103,6 @@ for (const status of quadrantStatus.values()) {
   statusCounts[status] = (statusCounts[status] || 0) + 1;
 }
 console.log('Quadrant status:', statusCounts);
-
-// ─── SQLite DB ────────────────────────────────────────────────────────────────
-
-console.log('\n─── SQLite DB ───');
-const dbInit = await initDB(DB_PATH);
-if (dbInit) {
-  console.log('DB: ' + DB_PATH);
-  for (const [key, status] of quadrantStatus) {
-    const [qx, qy] = key.split(',').map(Number);
-    await insertOrIgnoreQuadrant(qx, qy, status);
-  }
-  console.log('Inserted quadrants into DB');
-}
 
 // ─── Filter pending + checkpoint ──────────────────────────────────────────────
 
@@ -271,11 +256,6 @@ const workerPromises = chunks.map((chunk, i) => new Promise((resolve, reject) =>
       }
     } else if (msg.type === 'tile_done') {
       checkpointTracker.markDone(msg.qx, msg.qy);
-    } else if (msg.type === 'db_update') {
-      if (dbInit) {
-        try { await updateQuadrantAttempt(msg.qx, msg.qy, msg.info); }
-        catch (e) { console.warn(`[db] update failed for (${msg.qx},${msg.qy}): ${e.message}`); }
-      }
     } else if (msg.type === 'done') {
       workerStats[i].done     = msg.stats.doneCount;
       workerStats[i].fail     = msg.stats.failCount;
@@ -497,6 +477,5 @@ console.log('Saved:', geojsonPath);
 console.log('Saved:', configPath);
 console.log('\n─── Export render complete ───');
 console.log('  Output dir: ' + OUTPUT_DIR);
-console.log('  DB: ' + DB_PATH);
 console.log('  GeoJSON: ' + geojsonPath);
 console.log('  Config: ' + configPath + '\n');
