@@ -1,160 +1,224 @@
-"""Tile traversal logic + helper callables cho TemplateBuilder.
+"""Tile/quadrant traversal logic cho isometric pipeline.
 
-Traversal: BFS theo (qx, qy) quadrant index, moi tile = 2x2 quadrants
-(voi tile_size=1024, quadrant_size=512).
+Thay the SQLite bang in-memory `QuadrantKVState` (set cua generated quadrants).
+Moi tile = 1024x102 = 2x2 quadrants (qx, qy) trong quadrant grid:
+  tile (tile_qx, tile_qy) chua quadrants:
+    (tile_qx*2,   tile_qy*2),
+    (tile_qx*2+1, tile_qy*2),
+    (tile_qx*2,   tile_qy*2+1),
+    (tile_qx*2+1, tile_qy*2+1)
 
-Helpers (su dung voi TemplateBuilder moi):
-- has_generation_quadrant: callable cho `has_generation(qx, qy)`
-- render_provider: callable cho `get_render(qx, qy)` - tra ve 512x512 PIL Image
-- generation_provider: callable cho `get_generation(qx, qy)` - tra ve 512x512 PIL Image
+TileTraversal: quan ly tiles (list co toa do tile), seed, va goi `plan.py`
+de sinh GenerationStep tiep theo (1/2/4 quadrants / request).
+
+Helpers (dung cho TemplateBuilder moi):
+- has_generation_quadrant(qx, qy) -> bool
+- render_provider(qx, qy) -> 512x512 PIL Image (crop tu render 1024x1024)
+- generation_provider(qx, qy) -> 512x512 PIL Image (crop tu gen 1024x1024)
 """
 from __future__ import annotations
 
-import heapq
 import re
-from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
-from typing import Callable, List, Optional, Set, Tuple
+from typing import Callable, Iterable, Optional
 
 from PIL import Image
 
 from inference.config import get_inference_config
+from inference.client.plan import (
+    Point,
+    RectBounds,
+    GenerationStep,
+    create_rectangle_plan,
+    get_2x2_quadrants,
+)
 
 _cfg = get_inference_config()
 QUADRANT_SIZE: int = _cfg.quadrant_size_px
 TEMPLATE_SIZE: int = _cfg.tile_size_px
 
-# Tile filename regex (mirror src/dzi/export_plan.mjs + inference/scripts/export_plan.py)
+# Tile filename regex (mirror src/dzi/export_plan.mjs + export_plan.py)
 TILE_FILENAME_RE = re.compile(r"^tile_([+-]\d+)_([+-]\d+)_[a-f0-9]+\.png$")
 
 
-class TileStatus(Enum):
-    PENDING = "pending"
-    GENERATING = "generating"
-    DONE = "done"
-    FAILED = "failed"
+# ============================================================================
+# QuadrantKVState
+# ============================================================================
 
 
-@dataclass
-class TileInfo:
-    qx: int
-    qy: int
-    status: TileStatus = TileStatus.PENDING
-    priority: float = 0.0
+class QuadrantKVState:
+    """In-memory quadrant generation state.
 
-
-class TileTraversal:
-    """
-    BFS traversal theo (qx, qy) quadrant index.
-
-    Moi tile = 2x2 quadrants. Traversal priority dua vao:
-    - So generated neighbors (nhieu hon = uu tien hon)
-    - Distance tu seed (gan hon = uu tien hon)
+    Quan ly set quadrant (qx, qy) da generated.
+    Thay the SQLite cho project hien tai (data set <10k quadrants).
     """
 
     def __init__(
         self,
-        tiles: List[Tuple[int, int]],
-        seed: Optional[Tuple[int, int]] = None,
+        quadrants: Optional[Iterable[tuple[int, int]]] = None,
     ):
-        self.tiles = set(tiles)
-        self.tile_infos: dict = {}
-        self.completed: Set[Tuple[int, int]] = set()
-        self.seed = seed or self._find_seed(tiles)
+        self._generated: set[tuple[int, int]] = set()
+        if quadrants:
+            self._generated.update(quadrants)
 
-        for (qx, qy) in tiles:
-            priority = self._calculate_priority(qx, qy)
-            self.tile_infos[(qx, qy)] = TileInfo(qx, qy, TileStatus.PENDING, priority)
+    def __contains__(self, q: tuple[int, int]) -> bool:
+        return q in self._generated
 
-    def _find_seed(self, tiles: List[Tuple[int, int]]) -> Tuple[int, int]:
+    def __len__(self) -> int:
+        return len(self._generated)
+
+    def is_generated(self, qx: int, qy: int) -> bool:
+        return (qx, qy) in self._generated
+
+    def mark_generated(self, quadrants: Iterable[tuple[int, int]]) -> None:
+        for q in quadrants:
+            self._generated.add((int(q[0]), int(q[1])))
+
+    def all_generated(self) -> set[tuple[int, int]]:
+        return set(self._generated)
+
+    def to_dict(self) -> dict:
+        return {
+            "quadrants": [list(q) for q in sorted(self._generated)],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "QuadrantKVState":
+        return cls(quadrants=tuple(tuple(q) for q in data.get("quadrants", [])))
+
+
+# ============================================================================
+# TileTraversal
+# ============================================================================
+
+
+class TileTraversal:
+    """
+    Tile-level state + plan-driven next-step generation.
+
+    - tiles: list tile (qx, qy) trong tile coords (khong phai quadrant).
+    - quadrant_state: QuadrantKVState theo doi per-quadrant.
+    - get_next_step(): goi plan.py sinh GenerationStep tiep theo.
+    - mark_done(quadrants): danh dau N quadrant vua gen xong.
+
+    Moi step tuong ung 1 request den inference server.
+    """
+
+    def __init__(
+        self,
+        tiles: list[tuple[int, int]],
+        quadrant_state: Optional[QuadrantKVState] = None,
+    ):
         if not tiles:
-            raise ValueError("No tiles provided")
-        return min(tiles, key=lambda t: abs(t[0]) + abs(t[1]))
+            raise ValueError("At least one tile required")
+        self.tiles: set[tuple[int, int]] = set(tiles)
+        self.quadrant_state = quadrant_state or QuadrantKVState()
 
-    def _calculate_priority(self, qx: int, qy: int) -> float:
-        if (qx, qy) in self.completed:
-            return -float("inf")
-
-        # Count 4-connected generated neighbors
-        neighbor_count = 0
-        for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
-            if (qx + dx, qy + dy) in self.completed:
-                neighbor_count += 1
-
-        if self.seed:
-            dist = abs(qx - self.seed[0]) + abs(qy - self.seed[1])
-        else:
-            dist = abs(qx) + abs(qy)
-
-        return neighbor_count * 10 - dist * 0.1
-
-    def can_generate(self, qx: int, qy: int) -> bool:
-        if (qx, qy) in self.completed:
-            return False
-        if (qx, qy) == self.seed:
-            return True
-        for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
-            if (qx + dx, qy + dy) in self.completed:
-                return True
-        return False
-
-    def get_next_batch(self, batch_size: int = 1) -> List[Tuple[int, int]]:
-        available = [
-            (self.tile_infos[(qx, qy)].priority, qx, qy)
-            for (qx, qy) in self.tiles
-            if self.can_generate(qx, qy) and (qx, qy) not in self.completed
-        ]
-        if not available:
-            return []
-        available.sort(reverse=True)
-        return [(qx, qy) for (_, qx, qy) in available[:batch_size]]
-
-    def mark_done(self, qx: int, qy: int) -> None:
-        self.completed.add((qx, qy))
-        if (qx, qy) in self.tile_infos:
-            self.tile_infos[(qx, qy)].status = TileStatus.DONE
-        for tile in self.tiles:
-            if tile not in self.completed:
-                self.tile_infos[tile].priority = self._calculate_priority(*tile)
-
-    def mark_failed(self, qx: int, qy: int) -> None:
-        if (qx, qy) in self.tile_infos:
-            self.tile_infos[(qx, qy)].status = TileStatus.FAILED
-
-    @property
-    def is_complete(self) -> bool:
-        return self.completed == self.tiles
-
-    @property
-    def progress(self) -> Tuple[int, int, int]:
-        completed = len(self.completed)
-        failed = sum(
-            1 for t in self.tiles
-            if self.tile_infos[t].status == TileStatus.FAILED
+        # Bounds cua vung tile (tinh theo quadrant coords)
+        all_quads: list[tuple[int, int]] = []
+        for tqx, tqy in self.tiles:
+            for q in get_2x2_quadrants(Point(tqx, tqy)):
+                all_quads.append(q.to_tuple())
+        if not all_quads:
+            raise ValueError("No quadrants from tiles")
+        self._bounds = RectBounds(
+            top_left=Point(min(q[0] for q in all_quads), min(q[1] for q in all_quads)),
+            bottom_right=Point(
+                max(q[0] for q in all_quads), max(q[1] for q in all_quads)
+            ),
         )
-        remaining = len(self.tiles) - completed - failed
-        return completed, failed, remaining
+
+        # Track current step index in plan
+        self._step_index = 0
+        self._current_plan = self._build_plan()
+
+    def _build_plan(self):
+        """Build full plan cho toan vung tile bang plan.create_rectangle_plan."""
+        return create_rectangle_plan(
+            bounds=self._bounds,
+            generated={
+                Point(q[0], q[1]) for q in self.quadrant_state.all_generated()
+            },
+        )
+
+    def get_next_step(self) -> Optional[GenerationStep]:
+        """
+        Tra ve GenerationStep tiep theo (1, 2, hoac 4 quadrants).
+
+        Returns None neu da gen xong het quadrant trong bounds.
+        """
+        # Rebuild plan neu state da thay doi (e.g. sau khi mark_done)
+        # De don gian va deterministic, ta rebuild khi step index het.
+        # Tuy nhien, de toi uu, ta cap nhat in-memory generated set ngay
+        # trong mark_done() va rebuild o day neu can.
+        if self._current_plan is None or self._step_index >= len(self._current_plan.steps):
+            # Thu rebuild (neu state da thay doi)
+            new_plan = self._build_plan()
+            if not new_plan.steps:
+                return None
+            # Neu plan moi khac plan cu (do state), reset index
+            self._current_plan = new_plan
+            self._step_index = 0
+
+        if self._step_index >= len(self._current_plan.steps):
+            return None
+
+        step = self._current_plan.steps[self._step_index]
+        self._step_index += 1
+
+        # Double-check: cac quadrants trong step phai chua generated
+        generated_set = self.quadrant_state.all_generated()
+        for q in step.quadrants:
+            if q in generated_set:
+                # Quadrant da gen -> skip step nay, lay step tiep theo
+                return self.get_next_step()
+
+        return step
+
+    def mark_done(self, quadrants: Iterable[tuple[int, int]]) -> None:
+        """Danh dau N quadrants vua gen xong (step 2x2/2x1/1x2/1x1)."""
+        self.quadrant_state.mark_generated(quadrants)
+        # Rebuild plan de buoc tiep theo tinh chinh xac
+        self._current_plan = self._build_plan()
+        self._step_index = 0
+
+    def is_complete(self) -> bool:
+        """True neu tat ca quadrant trong bounds da generated."""
+        for q in self._bounds.all_points():
+            if not self.quadrant_state.is_generated(q.x, q.y):
+                return False
+        return True
+
+    @property
+    def bounds(self) -> RectBounds:
+        return self._bounds
+
+    @property
+    def progress(self) -> tuple[int, int]:
+        """(generated_quadrants, total_quadrants)."""
+        total = self._bounds.area
+        done = sum(
+            1
+            for q in self._bounds.all_points()
+            if self.quadrant_state.is_generated(q.x, q.y)
+        )
+        return done, total
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Helpers cho TemplateBuilder (port tu isometric-nyc/shared.py)
-# ─────────────────────────────────────────────────────────────────────
+# ============================================================================
+# Helpers cho TemplateBuilder
+# ============================================================================
 
 
-def scan_generated_set(gen_dir: Path) -> Set[Tuple[int, int]]:
+def scan_generated_set(gen_dir: Path) -> set[tuple[int, int]]:
     """
-    Scan gen_dir, tra ve set (qx, qy) QUADRANT coords cua tiles da gen thanh cong.
+    Scan gen_dir, tra ve set quadrant (qx, qy) cua tiles da gen.
 
-    Moi file `tile_<qx>_<qy>_*.png` trong repo nay la 1 TILE 1024x1024 chua
-    4 quadrants:
-        tile_qx = qx_tile, tile_qy = qy_tile
-        quadrants: (qx_tile*2, qy_tile*2), (qx_tile*2+1, qy_tile*2),
-                   (qx_tile*2, qy_tile*2+1), (qx_tile*2+1, qy_tile*2+1)
-
-    Su dung cho `has_generation` callable.
+    Moi file `tile_<qx>_<qy>_*.png` la 1 tile 1024x1024 chua 4 quadrants:
+        quadrants: (qx*2, qy*2), (qx*2+1, qy*2),
+                   (qx*2, qy*2+1), (qx*2+1, qy*2+1)
     """
-    out: Set[Tuple[int, int]] = set()
+    out: set[tuple[int, int]] = set()
     if not gen_dir.exists():
         return out
     for f in gen_dir.glob("tile_+*_+*_*.png"):
@@ -164,7 +228,19 @@ def scan_generated_set(gen_dir: Path) -> Set[Tuple[int, int]]:
         try:
             tile_qx = int(m.group(1))
             tile_qy = int(m.group(2))
-            # Expand tile -> 4 quadrants
+            for ox in (0, 1):
+                for oy in (0, 1):
+                    out.add((tile_qx * 2 + ox, tile_qy * 2 + oy))
+        except ValueError:
+            continue
+    # Negative coords: tile_-N_+M_*.png (khong match pattern o tren)
+    for f in gen_dir.glob("tile_-*_+*_*.png"):
+        m = TILE_FILENAME_RE.match(f.name)
+        if not m:
+            continue
+        try:
+            tile_qx = int(m.group(1))  # van doc duoc so am qua regex (\d+ khong match -, nhung \d+ trong pattern `([+-]\d+)` da bao ca signed)
+            tile_qy = int(m.group(2))
             for ox in (0, 1):
                 for oy in (0, 1):
                     out.add((tile_qx * 2 + ox, tile_qy * 2 + oy))
@@ -180,10 +256,10 @@ def _sign_int(n: int) -> str:
 
 def crop_quadrant(img: Image.Image, qx: int, qy: int) -> Image.Image:
     """
-    Cat 1 quadrant (512x512) tu full tile (1024x1024) tai (qx, qy).
+    Cat 1 quadrant 512x512 tu full tile 1024x1024 tai (qx, qy).
 
-    Quadrant (qx, qy) nam o goc tren-trai tai (qx*512, qy*512) trong tile
-    1024x1024. Day la cach isometric-nyc to chuc (xem infill_template.py).
+    Quadrant (qx, qy) nam o (qx*512, qy*512) trong tile 1024x1024
+    (cach to chuc cua isometric-nyc, xem infill_template.py).
     """
     if img.size != (TEMPLATE_SIZE, TEMPLATE_SIZE):
         img = img.resize((TEMPLATE_SIZE, TEMPLATE_SIZE), Image.Resampling.LANCZOS)
@@ -193,12 +269,52 @@ def crop_quadrant(img: Image.Image, qx: int, qy: int) -> Image.Image:
 
 
 def make_has_generation(
-    generated_set: Set[Tuple[int, int]],
+    generated_set: set[tuple[int, int]],
 ) -> Callable[[int, int], bool]:
     """Closure cho has_generation(qx, qy)."""
+
     def has_generation(qx: int, qy: int) -> bool:
         return (qx, qy) in generated_set
+
     return has_generation
+
+
+def _make_provider(
+    dir_path: Path,
+    cache: Optional[dict],
+    label: str,
+) -> Callable[[int, int], Optional[Image.Image]]:
+    """Generic provider: load tile 1024x1024 + crop quadrant 512x512."""
+    cache = cache if cache is not None else {}
+
+    def get_image(qx: int, qy: int) -> Optional[Image.Image]:
+        tile_qx = qx // 2
+        tile_qy = qy // 2
+        tile_key = (tile_qx, tile_qy)
+        if tile_key in cache:
+            full_tile = cache[tile_key]
+        else:
+            pattern = f"tile_{_sign_int(tile_qx)}_{_sign_int(tile_qy)}_*.png"
+            matches = list(dir_path.glob(pattern))
+            if not matches:
+                cache[tile_key] = None
+                return None
+            try:
+                full_tile = Image.open(matches[0]).convert("RGB")
+                if full_tile.size != (TEMPLATE_SIZE, TEMPLATE_SIZE):
+                    full_tile = full_tile.resize(
+                        (TEMPLATE_SIZE, TEMPLATE_SIZE),
+                        Image.Resampling.LANCZOS,
+                    )
+                cache[tile_key] = full_tile
+            except Exception:
+                cache[tile_key] = None
+                return None
+        if full_tile is None:
+            return None
+        return crop_quadrant(full_tile, qx, qy)
+
+    return get_image
 
 
 def make_render_provider(
@@ -208,42 +324,9 @@ def make_render_provider(
     """
     Closure cho get_render(qx, qy).
 
-    Moi tile (qx_tile, qy_tile) = 2x2 quadrants bat dau tu
-    (qx_tile*2, qy_tile*2) trong quadrant coords.
-
-    Returns:
-        Callable tra ve 512x512 PIL Image (crop tu render 1024x1024) hoac None.
+    Tra ve 512x512 PIL Image (crop tu render 1024x1024) hoac None.
     """
-    cache = render_cache if render_cache is not None else {}
-
-    def get_render(qx: int, qy: int) -> Optional[Image.Image]:
-        # Tile index = (qx // 2, qy // 2) (4 quadrants / tile)
-        tile_qx = qx // 2
-        tile_qy = qy // 2
-        tile_key = (tile_qx, tile_qy)
-        if tile_key in cache:
-            full_tile = cache[tile_key]
-        else:
-            pattern = f"tile_{_sign_int(tile_qx)}_{_sign_int(tile_qy)}_*.png"
-            matches = list(renders_dir.glob(pattern))
-            if not matches:
-                cache[tile_key] = None
-                return None
-            try:
-                full_tile = Image.open(matches[0]).convert("RGB")
-                if full_tile.size != (TEMPLATE_SIZE, TEMPLATE_SIZE):
-                    full_tile = full_tile.resize(
-                        (TEMPLATE_SIZE, TEMPLATE_SIZE), Image.Resampling.LANCZOS
-                    )
-                cache[tile_key] = full_tile
-            except Exception:
-                cache[tile_key] = None
-                return None
-        if full_tile is None:
-            return None
-        return crop_quadrant(full_tile, qx, qy)
-
-    return get_render
+    return _make_provider(renders_dir, render_cache, "render")
 
 
 def make_generation_provider(
@@ -253,49 +336,16 @@ def make_generation_provider(
     """
     Closure cho get_generation(qx, qy).
 
-    Tra ve 512x512 PIL Image (crop tu generation 1024x1024 da save) hoac None.
+    Tra ve 512x512 PIL Image (crop tu generation 1024x1024) hoac None.
     """
-    cache = generation_cache if generation_cache is not None else {}
-
-    def get_generation(qx: int, qy: int) -> Optional[Image.Image]:
-        tile_qx = qx // 2
-        tile_qy = qy // 2
-        tile_key = (tile_qx, tile_qy)
-        if tile_key in cache:
-            full_tile = cache[tile_key]
-        else:
-            pattern = f"tile_{_sign_int(tile_qx)}_{_sign_int(tile_qy)}_*.png"
-            matches = list(gen_dir.glob(pattern))
-            if not matches:
-                cache[tile_key] = None
-                return None
-            try:
-                full_tile = Image.open(matches[0]).convert("RGB")
-                if full_tile.size != (TEMPLATE_SIZE, TEMPLATE_SIZE):
-                    full_tile = full_tile.resize(
-                        (TEMPLATE_SIZE, TEMPLATE_SIZE), Image.Resampling.LANCZOS
-                    )
-                cache[tile_key] = full_tile
-            except Exception:
-                cache[tile_key] = None
-                return None
-        if full_tile is None:
-            return None
-        return crop_quadrant(full_tile, qx, qy)
-
-    return get_generation
+    return _make_provider(gen_dir, generation_cache, "generation")
 
 
 def quadrant_iteration_order(
     start_qx: int, start_qy: int
-) -> List[Tuple[int, int, str]]:
-    """
-    Order generate quadrants within 1 tile (2x2).
-    Tra ve (qx, qy, region_type) tuples:
-    1. tl (top-left) - 1st, khong co context
-    2. tr (top-right) - context tu tl
-    3. bl (bottom-left) - context tu tl, tr
-    4. br (bottom-right) - context tu ca 3
+) -> list[tuple[int, int, str]]:
+    """Order generate quadrants within 1 tile (2x2):
+    tl, tr, bl, br - moi buoc sau co context tu buoc truoc.
     """
     return [
         (start_qx * 2,     start_qy * 2,     "tl"),
@@ -303,17 +353,3 @@ def quadrant_iteration_order(
         (start_qx * 2,     start_qy * 2 + 1, "bl"),
         (start_qx * 2 + 1, start_qy * 2 + 1, "br"),
     ]
-
-
-def build_neighbor_map(
-    tiles: List[Tuple[int, int]]
-) -> dict:
-    """Build map tile -> 4-connected neighbors."""
-    neighbor_map = {tile: [] for tile in tiles}
-    for tile in tiles:
-        qx, qy = tile
-        for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
-            neighbor = (qx + dx, qy + dy)
-            if neighbor in neighbor_map:
-                neighbor_map[tile].append(neighbor)
-    return neighbor_map

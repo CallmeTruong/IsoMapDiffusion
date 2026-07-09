@@ -1,23 +1,18 @@
 """
-Template builder cho omni infill generation.
+Infill template generation cho isometric pipeline.
 
-PORT TU: isometric-nyc/src/isometric_nyc/generation/infill_template.py
+Port tu `isometric-nyc/src/isometric_nyc/generation/infill_template.py`,
+giu nguyen logic seam-avoidance va placement optimization. Logic cot loi:
 
-Logic ghep tile khi gen:
-- Template 1024x1024 pixel
-- Moi tile chia thanh 2x2 quadrants (512x512 moi quadrant)
-- Infill region la mot rectangle (1 quadrant hoac nhieu quadrant ke nhau)
-- Vi tri infill trong template duoc toi uu (push ve phia doi dien generated
-  neighbors) de toi da context, tranh seam.
-- Red border (255,0,0,255) ve quanh infill rect, border_width=2.
-- Context quadrants paste generation (pixel art da gen)
-- Infill quadrants paste render (3D render)
+- Infill region (den 50% cua 1024x1024 tile) duoc dat trong template sao cho
+  KHONG canh nao cua infill (left/right/top/bottom) cham generated neighbor
+  (tranh seam noi dung).
+- Neu co generated neighbor, placement se "day" infill sang phia doi dien de
+  context quadrants (xung quanh) la generated quadrants.
+- Neu khong tim duoc placement hoan hao, co gang expand infill (cho phep
+  them padding quadrants) hoac fall back seam-tolerant placement.
 
-Coords:
-- (qx, qy) = world quadrant index
-- quadrant (qx, qy) = o (qx*512, qy*512) den (qx*512+512, qy*512+512) trong world
-- tile (qx_tile, qy_tile) = 2x2 quadrants bat dau tu (qx_tile*2, qy_tile*2)
-  (1 tile = 4 quadrants, moi tile 1024x1024, moi quadrant 512x512)
+Template luon 1024x1024 px. Quadrant 512x512 px (the isometric-nyc convention).
 """
 from __future__ import annotations
 
@@ -26,37 +21,39 @@ from typing import Callable, Optional
 
 from PIL import Image, ImageDraw
 
-from inference.config import get_inference_config
+# Kich thuoc co dinh (theo isometric-nyc convention)
+TEMPLATE_SIZE = 1024
+QUADRANT_SIZE = 512
+MAX_INFILL_AREA = TEMPLATE_SIZE * TEMPLATE_SIZE // 2  # 50% cua template
 
-# Lay config tu src/config.mjs (khong hardcode)
-_cfg = get_inference_config()
+# Loai cua has_generation/get_render/get_generation callbacks
+HasGeneration = Callable[[int, int], bool]
+GetQuadrantImage = Callable[[int, int], Optional[Image.Image]]
 
-# Constants tu InferenceConfig (mirror src/config.mjs + isometric-nyc)
-TEMPLATE_SIZE: int = _cfg.tile_size_px            # 1024
-QUADRANT_SIZE: int = _cfg.quadrant_size_px        # 512
-MAX_INFILL_AREA: int = _cfg.max_infill_area       # 524288 = 50% cua 1024^2
-BORDER_COLOR: tuple = _cfg.border_color           # (255, 0, 0, 255)
-BORDER_WIDTH: int = _cfg.border_width             # 2
 
-RegionType = str  # "full" | "tl" | "tr" | "bl" | "br" | "left" | "right" | "top" | "bottom"
+# ============================================================================
+# Data structures
+# ============================================================================
 
 
 @dataclass
 class InfillRegion:
-    """
-    Vung rect can dien (infill) trong world pixel coords.
+    """Vung hinh chu nhat can duoc gen.
 
-    Coords (x, y) la world pixel (khong phai quadrant index).
-    Moi quadrant = 512x512 = QUADRANT_SIZE.
+    Toa do la "world" pixel space, trong do:
+    - (0, 0) la top-left cua quadrant (0, 0)
+    - x tang sang phai, y tang xuong duoi
+    - Moi quadrant 512x512 pixels
     """
-    x: int
-    y: int
-    width: int
-    height: int
+
+    x: int  # World x (top-left)
+    y: int  # World y (top-left)
+    width: int  # Width (px)
+    height: int  # Height (px)
 
     @classmethod
     def from_quadrant(cls, qx: int, qy: int) -> "InfillRegion":
-        """Mot quadrant (512x512) tai (qx, qy)."""
+        """Tao region cho 1 quadrant don le."""
         return cls(
             x=qx * QUADRANT_SIZE,
             y=qy * QUADRANT_SIZE,
@@ -66,7 +63,7 @@ class InfillRegion:
 
     @classmethod
     def from_quadrants(cls, quadrants: list[tuple[int, int]]) -> "InfillRegion":
-        """Bounding rect cua nhieu quadrant ke nhau (phai contiguous rectangle)."""
+        """Tao region chua nhieu quadrant (phai lien tuc thanh rectangle)."""
         if not quadrants:
             raise ValueError("At least one quadrant required")
         min_qx = min(q[0] for q in quadrants)
@@ -78,16 +75,6 @@ class InfillRegion:
             y=min_qy * QUADRANT_SIZE,
             width=(max_qx - min_qx + 1) * QUADRANT_SIZE,
             height=(max_qy - min_qy + 1) * QUADRANT_SIZE,
-        )
-
-    @classmethod
-    def full_tile(cls, tile_qx: int, tile_qy: int) -> "InfillRegion":
-        """Full tile 1024x102x tai (tile_qx, tile_qy) (4 quadrants)."""
-        return cls(
-            x=tile_qx * TEMPLATE_SIZE,
-            y=tile_qy * TEMPLATE_SIZE,
-            width=TEMPLATE_SIZE,
-            height=TEMPLATE_SIZE,
         )
 
     @property
@@ -102,25 +89,24 @@ class InfillRegion:
     def bottom(self) -> int:
         return self.y + self.height
 
-    def is_full_tile(self) -> bool:
-        """True neu region = 1024x1024 (full tile)."""
-        return self.width == TEMPLATE_SIZE and self.height == TEMPLATE_SIZE
-
     def is_valid_size(self) -> bool:
-        """True neu area <= 50% template HOAC full tile (100%)."""
+        """<= 50% template, hoac chinh xac full tile (2x2 quadrants)."""
         return self.area <= MAX_INFILL_AREA or self.is_full_tile()
 
+    def is_full_tile(self) -> bool:
+        return self.width == TEMPLATE_SIZE and self.height == TEMPLATE_SIZE
+
     def overlapping_quadrants(self) -> list[tuple[int, int]]:
-        """List (qx, qy) overlap voi region (theo quadrant grid)."""
-        quadrants = []
+        """List (qx, qy) ma region nay chiem (khi aligned voi quadrant grid)."""
         start_qx = self.x // QUADRANT_SIZE
         end_qx = (self.right - 1) // QUADRANT_SIZE
         start_qy = self.y // QUADRANT_SIZE
         end_qy = (self.bottom - 1) // QUADRANT_SIZE
-        for qx in range(start_qx, end_qx + 1):
-            for qy in range(start_qy, end_qy + 1):
-                quadrants.append((qx, qy))
-        return quadrants
+        return [
+            (qx, qy)
+            for qx in range(start_qx, end_qx + 1)
+            for qy in range(start_qy, end_qy + 1)
+        ]
 
     def __str__(self) -> str:
         return f"InfillRegion(x={self.x}, y={self.y}, w={self.width}, h={self.height})"
@@ -128,17 +114,27 @@ class InfillRegion:
 
 @dataclass
 class TemplatePlacement:
-    """Vi tri dat infill region trong template 1024x1024."""
-    infill_x: int           # toa do x cua infill trong template (0..1024-w)
-    infill_y: int           # toa do y cua infill trong template
-    world_offset_x: int     # world x cua goc tren-trai template
-    world_offset_y: int     # world y cua goc tren-trai template
+    """Vi tri dat infill trong template 1024x1024."""
 
-    _infill_width: int = field(default=0, init=False)
-    _infill_height: int = field(default=0, init=False)
-    _primary_quadrants: list = field(default_factory=list, init=False)
-    _padding_quadrants: list = field(default_factory=list, init=False)
-    _expanded_region: Optional["InfillRegion"] = field(default=None, init=False)
+    infill_x: int  # Vi tri (x, y) cua infill trong template (0..1024)
+    infill_y: int
+    world_offset_x: int  # Toa do world cua top-left template
+    world_offset_y: int
+
+    # Set sau khi construction
+    _infill_width: int = 0
+    _infill_height: int = 0
+    _primary_quadrants: list[tuple[int, int]] = field(default_factory=list)
+    _padding_quadrants: list[tuple[int, int]] = field(default_factory=list)
+    _expanded_region: Optional[InfillRegion] = None
+
+    @property
+    def infill_width(self) -> int:
+        return self._infill_width
+
+    @property
+    def infill_height(self) -> int:
+        return self._infill_height
 
     @property
     def infill_right(self) -> int:
@@ -149,51 +145,53 @@ class TemplatePlacement:
         return self.infill_y + self._infill_height
 
     @property
-    def primary_quadrants(self) -> list:
+    def primary_quadrants(self) -> list[tuple[int, int]]:
+        """Quadrants user chon ban dau."""
         return self._primary_quadrants
 
     @property
-    def padding_quadrants(self) -> list:
+    def padding_quadrants(self) -> list[tuple[int, int]]:
+        """Quadrants auto-them de cover missing context."""
         return self._padding_quadrants
+
+    @property
+    def all_infill_quadrants(self) -> list[tuple[int, int]]:
+        """Tat ca quadrants se duoc fill voi render pixels."""
+        return self._primary_quadrants + self._padding_quadrants
 
     @property
     def is_expanded(self) -> bool:
         return len(self._padding_quadrants) > 0
 
-    def __str__(self) -> str:
-        return (
-            f"TemplatePlacement(infill=({self.infill_x},{self.infill_y}) "
-            f"{self._infill_width}x{self._infill_height}, "
-            f"world_offset=({self.world_offset_x},{self.world_offset_y}))"
-        )
+
+# ============================================================================
+# TemplateBuilder
+# ============================================================================
 
 
 class TemplateBuilder:
-    """
-    Build 1024x1024 template image cho infill generation.
+    """Build template image cho infill generation.
 
-    Logic ghep:
-    1. Tinh placement (vi tri infill trong template) dua vao generated neighbors:
-       - Neu co generated ben trai: push infill sang phai
-       - Neu co generated ben phai: push infill sang trai
-       - Neu ca 2: can giua
-       - Tuong tu cho top/bottom
-    2. Validate: neu infill cham mep template VA co generated ben ngoai mep do -> INVALID (seam)
-    3. Build template:
-       - Tao RGBA 1024x1024
-       - Voi moi quadrant overlap voi template:
-         + Neu quadrant trong infill: paste render (co the corrupt)
-         + Else: paste generation (context)
-       - Ve red border quanh infill rect
+    Dam bao:
+    - Dat infill region toi uu de maximize context (generated neighbors).
+    - Validate seam (neu edge cua infill cham generated neighbor -> reject).
+    - Assembly template tu quadrant data (context = generation, infill = render).
     """
 
     def __init__(
         self,
         infill_region: InfillRegion,
-        has_generation: Callable[[int, int], bool],
-        get_render: Optional[Callable[[int, int], Optional[Image.Image]]] = None,
-        get_generation: Optional[Callable[[int, int], Optional[Image.Image]]] = None,
+        has_generation: HasGeneration,
+        get_render: Optional[GetQuadrantImage] = None,
+        get_generation: Optional[GetQuadrantImage] = None,
     ):
+        """
+        Args:
+            infill_region: Vung can gen.
+            has_generation: Callable(qx, qy) -> bool. True neu quadrant da generated.
+            get_render: Callable(qx, qy) -> Image. Render 3D (dung cho infill).
+            get_generation: Callable(qx, qy) -> Image. Generated pixels (context).
+        """
         self.region = infill_region
         self.has_generation = has_generation
         self.get_render = get_render
@@ -206,55 +204,54 @@ class TemplateBuilder:
                 f"(max: {MAX_INFILL_AREA})"
             )
 
-    def _has_generated_context(self, side: str) -> bool:
+    def find_optimal_placement(
+        self, allow_expansion: bool = False
+    ) -> Optional[TemplatePlacement]:
         """
-        Kiem tra co quadrant generated ke canh voi infill region o phia 'side'.
-        side in {left, right, top, bottom}.
+        Tim optimal placement cho infill region trong template.
+
+        Returns None neu khong co placement nao tranh duoc seam.
         """
-        if side == "left":
-            check_x = self.region.x - 1
-            qx = check_x // QUADRANT_SIZE
-            start_qy = self.region.y // QUADRANT_SIZE
-            end_qy = (self.region.bottom - 1) // QUADRANT_SIZE
-            return any(
-                self.has_generation(qx, qy) for qy in range(start_qy, end_qy + 1)
-            )
-        elif side == "right":
-            check_x = self.region.right
-            qx = check_x // QUADRANT_SIZE
-            start_qy = self.region.y // QUADRANT_SIZE
-            end_qy = (self.region.bottom - 1) // QUADRANT_SIZE
-            return any(
-                self.has_generation(qx, qy) for qy in range(start_qy, end_qy + 1)
-            )
-        elif side == "top":
-            check_y = self.region.y - 1
-            qy = check_y // QUADRANT_SIZE
-            start_qx = self.region.x // QUADRANT_SIZE
-            end_qx = (self.region.right - 1) // QUADRANT_SIZE
-            return any(
-                self.has_generation(qx, qy) for qx in range(start_qx, end_qx + 1)
-            )
-        elif side == "bottom":
-            check_y = self.region.bottom
-            qy = check_y // QUADRANT_SIZE
-            start_qx = self.region.x // QUADRANT_SIZE
-            end_qx = (self.region.right - 1) // QUADRANT_SIZE
-            return any(
-                self.has_generation(qx, qy) for qx in range(start_qx, end_qx + 1)
-            )
-        return False
+        placement = self._try_placement_with_context_preferences(
+            include_left=True,
+            include_right=True,
+            include_top=True,
+            include_bottom=True,
+        )
+
+        if placement is None:
+            return None
+
+        missing = self._find_missing_context_quadrants(placement)
+        if not missing:
+            return placement
+
+        # Co missing context - thu alternative placements
+        alternative = self._try_alternative_placements(missing, allow_expansion)
+        if alternative is not None:
+            return alternative
+
+        # Fallback: expansion (neu allow)
+        if allow_expansion:
+            expanded = self._expand_to_cover_missing(placement, missing)
+            if expanded is not None:
+                return expanded
+
+        missing_str = ", ".join(f"({qx}, {qy})" for qx, qy in missing)
+        self._last_validation_error = (
+            f"Context quadrants missing generations: {missing_str}"
+        )
+        return None
 
     def _try_placement_with_context_preferences(
         self,
-        include_left: bool = True,
-        include_right: bool = True,
-        include_top: bool = True,
-        include_bottom: bool = True,
+        include_left: bool,
+        include_right: bool,
+        include_top: bool,
+        include_bottom: bool,
     ) -> Optional[TemplatePlacement]:
         """
-        Tim placement hop le dua vao context preferences.
-        Push infill ve phia doi dien generated de max context, tranh seam.
+        Try placement theo context preferences (which sides to include).
         """
         margin_x = TEMPLATE_SIZE - self.region.width
         margin_y = TEMPLATE_SIZE - self.region.height
@@ -270,16 +267,16 @@ class TemplateBuilder:
         if has_left_gen and has_right_gen:
             infill_x = margin_x // 2
         elif has_left_gen:
-            infill_x = margin_x  # push sang phai
+            infill_x = margin_x
         elif has_right_gen:
-            infill_x = 0  # push sang trai
+            infill_x = 0
         else:
-            # No horizontal context - kiem tra that su
-            actual_left_gen = self._has_generated_context("left")
-            actual_right_gen = self._has_generated_context("right")
-            if actual_right_gen and not actual_left_gen:
+            # Khong co context -> dat phia xa generated
+            actual_left = self._has_generated_context("left")
+            actual_right = self._has_generated_context("right")
+            if actual_right and not actual_left:
                 infill_x = 0
-            elif actual_left_gen and not actual_right_gen:
+            elif actual_left and not actual_right:
                 infill_x = margin_x
             else:
                 infill_x = 0
@@ -288,15 +285,15 @@ class TemplateBuilder:
         if has_top_gen and has_bottom_gen:
             infill_y = margin_y // 2
         elif has_top_gen:
-            infill_y = margin_y  # push xuong
+            infill_y = margin_y
         elif has_bottom_gen:
-            infill_y = 0  # push len
+            infill_y = 0
         else:
-            actual_top_gen = self._has_generated_context("top")
-            actual_bottom_gen = self._has_generated_context("bottom")
-            if actual_bottom_gen and not actual_top_gen:
+            actual_top = self._has_generated_context("top")
+            actual_bottom = self._has_generated_context("bottom")
+            if actual_bottom and not actual_top:
                 infill_y = 0
-            elif actual_top_gen and not actual_bottom_gen:
+            elif actual_top and not actual_bottom:
                 infill_y = margin_y
             else:
                 infill_y = 0
@@ -313,7 +310,6 @@ class TemplateBuilder:
         placement._infill_width = self.region.width
         placement._infill_height = self.region.height
 
-        # Validate seams
         is_valid, error = self._validate_placement_seams(placement)
         if not is_valid:
             self._last_validation_error = error
@@ -321,31 +317,201 @@ class TemplateBuilder:
 
         return placement
 
+    def _try_alternative_placements(
+        self,
+        missing: list[tuple[int, int]],
+        allow_expansion: bool,
+    ) -> Optional[TemplatePlacement]:
+        """Thu cac placements khac de tranh missing context quadrants."""
+        infill_quadrants = set(self.region.overlapping_quadrants())
+        infill_min_qx = min(q[0] for q in infill_quadrants)
+        infill_max_qx = max(q[0] for q in infill_quadrants)
+        infill_min_qy = min(q[1] for q in infill_quadrants)
+        infill_max_qy = max(q[1] for q in infill_quadrants)
+
+        problem_sides = set()
+        for qx, qy in missing:
+            if qx < infill_min_qx:
+                problem_sides.add("left")
+            if qx > infill_max_qx:
+                problem_sides.add("right")
+            if qy < infill_min_qy:
+                problem_sides.add("top")
+            if qy > infill_max_qy:
+                problem_sides.add("bottom")
+
+        side_combinations: list[set[str]] = []
+        if problem_sides:
+            side_combinations.append(problem_sides)
+        for side in problem_sides:
+            side_combinations.append({side})
+
+        for exclude_sides in side_combinations:
+            placement = self._try_placement_with_context_preferences(
+                include_left="left" not in exclude_sides,
+                include_right="right" not in exclude_sides,
+                include_top="top" not in exclude_sides,
+                include_bottom="bottom" not in exclude_sides,
+            )
+            if placement is None:
+                continue
+
+            new_missing = self._find_missing_context_quadrants(placement)
+            if not new_missing:
+                return placement
+
+            if allow_expansion and len(new_missing) < len(missing):
+                expanded = self._expand_to_cover_missing(placement, new_missing)
+                if expanded is not None:
+                    return expanded
+
+        # Last resort: seam-tolerant placement
+        best = self._try_seam_tolerant_placement(problem_sides)
+        if best is not None:
+            return best
+
+        return None
+
+    def _try_seam_tolerant_placement(
+        self, problem_sides: set[str]
+    ) -> Optional[TemplatePlacement]:
+        """Tim placement chap nhan seam (last resort)."""
+        margin_x = TEMPLATE_SIZE - self.region.width
+        margin_y = TEMPLATE_SIZE - self.region.height
+
+        has_left_gen = self._has_generated_context("left")
+        has_right_gen = self._has_generated_context("right")
+        has_top_gen = self._has_generated_context("top")
+        has_bottom_gen = self._has_generated_context("bottom")
+
+        positions: list[tuple[int, int]] = []
+
+        # Loai bo problem sides, day infill sang phia doi dien
+        if "left" in problem_sides:
+            infill_x = 0
+            if has_top_gen and "top" not in problem_sides:
+                infill_y = margin_y
+            elif has_bottom_gen and "bottom" not in problem_sides:
+                infill_y = 0
+            else:
+                infill_y = 0
+            positions.append((infill_x, infill_y))
+
+        if "right" in problem_sides:
+            infill_x = margin_x
+            if has_top_gen and "top" not in problem_sides:
+                infill_y = margin_y
+            elif has_bottom_gen and "bottom" not in problem_sides:
+                infill_y = 0
+            else:
+                infill_y = 0
+            positions.append((infill_x, infill_y))
+
+        if "top" in problem_sides:
+            infill_y = 0
+            if has_right_gen and "right" not in problem_sides:
+                infill_x = 0
+            elif has_left_gen and "left" not in problem_sides:
+                infill_x = margin_x
+            else:
+                infill_x = 0
+            positions.append((infill_x, infill_y))
+
+        if "bottom" in problem_sides:
+            infill_y = margin_y
+            if has_right_gen and "right" not in problem_sides:
+                infill_x = 0
+            elif has_left_gen and "left" not in problem_sides:
+                infill_x = margin_x
+            else:
+                infill_x = 0
+            positions.append((infill_x, infill_y))
+
+        # Try 4 corners
+        corners = [
+            (0, 0),
+            (margin_x, 0),
+            (0, margin_y),
+            (margin_x, margin_y),
+        ]
+        positions.extend(corners)
+
+        for infill_x, infill_y in positions:
+            world_offset_x = self.region.x - infill_x
+            world_offset_y = self.region.y - infill_y
+
+            placement = TemplatePlacement(
+                infill_x=infill_x,
+                infill_y=infill_y,
+                world_offset_x=world_offset_x,
+                world_offset_y=world_offset_y,
+            )
+            placement._infill_width = self.region.width
+            placement._infill_height = self.region.height
+
+            missing = self._find_missing_context_quadrants(placement)
+            if not missing:
+                return placement
+
+        return None
+
+    def _has_generated_context(self, side: str) -> bool:
+        """Check ben canh (left/right/top/bottom) cua region co generated quadrant khong."""
+        if side == "left":
+            check_x = self.region.x - 1
+            qx = check_x // QUADRANT_SIZE
+            start_qy = self.region.y // QUADRANT_SIZE
+            end_qy = (self.region.bottom - 1) // QUADRANT_SIZE
+            return any(self.has_generation(qx, qy) for qy in range(start_qy, end_qy + 1))
+
+        if side == "right":
+            check_x = self.region.right
+            qx = check_x // QUADRANT_SIZE
+            start_qy = self.region.y // QUADRANT_SIZE
+            end_qy = (self.region.bottom - 1) // QUADRANT_SIZE
+            return any(self.has_generation(qx, qy) for qy in range(start_qy, end_qy + 1))
+
+        if side == "top":
+            check_y = self.region.y - 1
+            qy = check_y // QUADRANT_SIZE
+            start_qx = self.region.x // QUADRANT_SIZE
+            end_qx = (self.region.right - 1) // QUADRANT_SIZE
+            return any(self.has_generation(qx, qy) for qx in range(start_qx, end_qx + 1))
+
+        if side == "bottom":
+            check_y = self.region.bottom
+            qy = check_y // QUADRANT_SIZE
+            start_qx = self.region.x // QUADRANT_SIZE
+            end_qx = (self.region.right - 1) // QUADRANT_SIZE
+            return any(self.has_generation(qx, qy) for qx in range(start_qx, end_qx + 1))
+
+        return False
+
     def _validate_placement_seams(
         self, placement: TemplatePlacement
     ) -> tuple[bool, str]:
+        """Check placement khong tao seam.
+
+        Seam = edge cua infill (template boundary) co generated neighbor ben ngoai.
         """
-        Validate: neu infill cham mep template VA co generated ben ngoai -> INVALID.
-        """
-        if placement.infill_x == 0:
-            if self._has_generated_context("left"):
-                return False, "Would create seam with generated pixels on left"
-        if placement.infill_x + self.region.width == TEMPLATE_SIZE:
-            if self._has_generated_context("right"):
-                return False, "Would create seam with generated pixels on right"
-        if placement.infill_y == 0:
-            if self._has_generated_context("top"):
-                return False, "Would create seam with generated pixels on top"
-        if placement.infill_y + self.region.height == TEMPLATE_SIZE:
-            if self._has_generated_context("bottom"):
-                return False, "Would create seam with generated pixels on bottom"
+        if placement.infill_x == 0 and self._has_generated_context("left"):
+            return False, "Would create seam with generated pixels on left"
+        if placement.infill_x + self.region.width == TEMPLATE_SIZE and self._has_generated_context(
+            "right"
+        ):
+            return False, "Would create seam with generated pixels on right"
+        if placement.infill_y == 0 and self._has_generated_context("top"):
+            return False, "Would create seam with generated pixels on top"
+        if placement.infill_y + self.region.height == TEMPLATE_SIZE and self._has_generated_context(
+            "bottom"
+        ):
+            return False, "Would create seam with generated pixels on bottom"
         return True, ""
 
     def _find_missing_context_quadrants(
         self, placement: TemplatePlacement
     ) -> list[tuple[int, int]]:
-        """Context quadrants (in template, NOT in infill) ma khong co generation."""
-        missing = []
+        """Context quadrants (in template, not in infill) ma khong co generation."""
         template_world_left = placement.world_offset_x
         template_world_right = placement.world_offset_x + TEMPLATE_SIZE
         template_world_top = placement.world_offset_y
@@ -358,6 +524,7 @@ class TemplateBuilder:
 
         infill_quadrants = set(self.region.overlapping_quadrants())
 
+        missing: list[tuple[int, int]] = []
         for qx in range(start_qx, end_qx + 1):
             for qy in range(start_qy, end_qy + 1):
                 if (qx, qy) not in infill_quadrants:
@@ -365,38 +532,61 @@ class TemplateBuilder:
                         missing.append((qx, qy))
         return missing
 
-    def find_optimal_placement(
-        self, allow_expansion: bool = False
+    def _expand_to_cover_missing(
+        self,
+        placement: TemplatePlacement,
+        missing: list[tuple[int, int]],
     ) -> Optional[TemplatePlacement]:
-        """Tim vi tri tot nhat cho infill region trong template."""
-        placement = self._try_placement_with_context_preferences(
-            include_left=True,
-            include_right=True,
-            include_top=True,
-            include_bottom=True,
+        """Expand infill region de cover missing context quadrants."""
+        primary_quadrants = self.region.overlapping_quadrants()
+        all_quadrants = set(primary_quadrants + missing)
+
+        min_qx = min(q[0] for q in all_quadrants)
+        max_qx = max(q[0] for q in all_quadrants)
+        min_qy = min(q[1] for q in all_quadrants)
+        max_qy = max(q[1] for q in all_quadrants)
+
+        expanded_region = InfillRegion(
+            x=min_qx * QUADRANT_SIZE,
+            y=min_qy * QUADRANT_SIZE,
+            width=(max_qx - min_qx + 1) * QUADRANT_SIZE,
+            height=(max_qy - min_qy + 1) * QUADRANT_SIZE,
         )
-        if placement is not None:
-            missing = self._find_missing_context_quadrants(placement)
-            if not missing:
-                return placement
-            # TODO: alternative placements / expansion
-            missing_str = ", ".join(f"({qx}, {qy})" for qx, qy in missing)
+
+        if not expanded_region.is_valid_size():
             self._last_validation_error = (
-                f"Context quadrants missing generations: {missing_str}"
+                f"Cannot expand infill to cover missing quadrants: "
+                f"expanded region would be {expanded_region.area} pixels "
+                f"(max: {MAX_INFILL_AREA})"
             )
             return None
-        return None
+
+        expanded_builder = TemplateBuilder(
+            expanded_region, self.has_generation
+        )
+        expanded_placement = expanded_builder.find_optimal_placement(
+            allow_expansion=False
+        )
+
+        if expanded_placement is None:
+            self._last_validation_error = expanded_builder._last_validation_error
+            return None
+
+        expanded_placement._primary_quadrants = list(primary_quadrants)
+        expanded_placement._padding_quadrants = list(missing)
+        expanded_placement._expanded_region = expanded_region
+
+        return expanded_placement
 
     def build(
         self,
-        border_width: int = BORDER_WIDTH,
+        border_width: int = 2,
         allow_expansion: bool = False,
     ) -> Optional[tuple[Image.Image, TemplatePlacement]]:
-        """
-        Build 1024x1024 template image.
+        """Build template image (1024x1024).
 
         Returns:
-            (template_image, placement) hoac None neu khong co placement hop le.
+            (template_image, placement) hoac None neu khong co valid placement.
         """
         if self.get_render is None or self.get_generation is None:
             raise ValueError("get_render and get_generation must be provided to build")
@@ -405,17 +595,13 @@ class TemplateBuilder:
         if placement is None:
             return None
 
-        # Effective region (expanded if applicable)
         effective_region = (
-            placement._expanded_region
-            if placement._expanded_region is not None
+            placement._expanded_region if placement._expanded_region is not None
             else self.region
         )
 
-        # Tao RGBA 1024x1024 transparent
         template = Image.new("RGBA", (TEMPLATE_SIZE, TEMPLATE_SIZE), (0, 0, 0, 0))
 
-        # Determine quadrants trong template
         template_world_left = placement.world_offset_x
         template_world_right = placement.world_offset_x + TEMPLATE_SIZE
         template_world_top = placement.world_offset_y
@@ -428,7 +614,6 @@ class TemplateBuilder:
 
         infill_quadrants = set(effective_region.overlapping_quadrants())
 
-        # Fill quadrants
         for qx in range(start_qx, end_qx + 1):
             for qy in range(start_qy, end_qy + 1):
                 quad_world_x = qx * QUADRANT_SIZE
@@ -438,13 +623,14 @@ class TemplateBuilder:
 
                 if (qx, qy) in infill_quadrants:
                     quad_img = self.get_render(qx, qy)
+                    if quad_img is None:
+                        continue
                 else:
                     quad_img = self.get_generation(qx, qy)
+                    if quad_img is None:
+                        continue
 
-                if quad_img is None:
-                    continue
-
-                # Resize if needed
+                # Resize neu can (VD tu DZI deep zoom khac size)
                 if quad_img.size != (QUADRANT_SIZE, QUADRANT_SIZE):
                     quad_img = quad_img.resize(
                         (QUADRANT_SIZE, QUADRANT_SIZE), Image.Resampling.LANCZOS
@@ -452,7 +638,7 @@ class TemplateBuilder:
                 if quad_img.mode != "RGBA":
                     quad_img = quad_img.convert("RGBA")
 
-                # Crop if quadrant extends outside template
+                # Crop phan overlap voi template
                 crop_left = max(0, -template_x)
                 crop_top = max(0, -template_y)
                 crop_right = min(QUADRANT_SIZE, TEMPLATE_SIZE - template_x)
@@ -466,10 +652,10 @@ class TemplateBuilder:
                     paste_y = max(0, template_y)
                     template.paste(cropped, (paste_x, paste_y))
 
-        # Ve red border quanh infill rect
+        # Ve khung do quanh infill region
         template = self._draw_border(template, placement, border_width)
 
-        return template.convert("RGB"), placement
+        return template, placement
 
     def _draw_border(
         self,
@@ -477,22 +663,26 @@ class TemplateBuilder:
         placement: TemplatePlacement,
         border_width: int,
     ) -> Image.Image:
-        """Ve red border quanh infill region."""
+        """Ve khung do quanh infill region."""
         result = template.copy()
         draw = ImageDraw.Draw(result)
+
+        red = (255, 0, 0, 255)
         left = placement.infill_x
         top = placement.infill_y
         right = placement.infill_x + self.region.width
         bottom = placement.infill_y + self.region.height
+
         for i in range(border_width):
             draw.rectangle(
                 [left + i, top + i, right - 1 - i, bottom - 1 - i],
-                outline=BORDER_COLOR,
+                outline=red,
                 fill=None,
             )
         return result
 
     def get_validation_info(self) -> dict:
+        """Debug info cho placement validation."""
         return {
             "region": str(self.region),
             "area": self.region.area,
@@ -507,22 +697,29 @@ class TemplateBuilder:
         }
 
 
+# ============================================================================
+# Convenience: validate quadrant selection
+# ============================================================================
+
+
 def validate_quadrant_selection(
     quadrants: list[tuple[int, int]],
-    has_generation: Callable[[int, int], bool],
+    has_generation: HasGeneration,
     allow_expansion: bool = False,
 ) -> tuple[bool, str, Optional[TemplatePlacement]]:
-    """
-    Validate quadrant selection va tim optimal placement.
+    """Validate 1 quadrant selection va tra ve optimal placement.
 
-    Special handling cho full tiles (2x2):
-    - Neu 1 so quadrants da co generation, giam xuong con lai
-    - Generated quadrants tro thanh context cho missing ones
+    Dac biet xu ly full tile (2x2):
+    - Neu 1 so quadrant da generated, reduce selection chi con quadrants missing.
+    - Neu KHONG co generated neighbor ngoai, dat full tile tai (0, 0) cua template.
+
+    Returns:
+        (is_valid, message, placement)
     """
     if not quadrants:
         return False, "No quadrants selected", None
 
-    # Check quadrants form rectangle
+    # Check quadrants form a contiguous rectangle
     min_qx = min(q[0] for q in quadrants)
     max_qx = max(q[0] for q in quadrants)
     min_qy = min(q[1] for q in quadrants)
@@ -532,11 +729,11 @@ def validate_quadrant_selection(
     if len(quadrants) != expected_count:
         return False, "Quadrants must form a contiguous rectangle", None
 
-    expected = set()
-    for qx in range(min_qx, max_qx + 1):
-        for qy in range(min_qy, max_qy + 1):
-            expected.add((qx, qy))
-
+    expected = {
+        (qx, qy)
+        for qx in range(min_qx, max_qx + 1)
+        for qy in range(min_qy, max_qy + 1)
+    }
     if set(quadrants) != expected:
         return False, "Quadrants must form a contiguous rectangle", None
 
@@ -549,10 +746,12 @@ def validate_quadrant_selection(
             None,
         )
 
-    # Full tile special handling
+    # Full tile (2x2) special case
     if region.is_full_tile():
-        generated_quadrants = [q for q in quadrants if has_generation(q[0], q[1])]
-        non_generated_quadrants = [
+        generated_quadrants = [
+            q for q in quadrants if has_generation(q[0], q[1])
+        ]
+        non_generated = [
             q for q in quadrants if not has_generation(q[0], q[1])
         ]
 
@@ -560,25 +759,30 @@ def validate_quadrant_selection(
             return False, "All quadrants already have generations", None
 
         if len(generated_quadrants) > 0:
+            # Mot so quadrant da generated - recurse voi phan con lai
             return validate_quadrant_selection(
-                non_generated_quadrants, has_generation, allow_expansion
+                non_generated, has_generation, allow_expansion
             )
 
-        # Full tile with no internal gens - check neighbors
+        # Full tile, chua co quadrant nao generated - check khong co generated neighbor
         has_any_gen_neighbor = False
         for qx, qy in quadrants:
-            if qx == min_qx and has_generation(qx - 1, qy):
-                has_any_gen_neighbor = True
-                break
-            if qx == max_qx and has_generation(qx + 1, qy):
-                has_any_gen_neighbor = True
-                break
-            if qy == min_qy and has_generation(qx, qy - 1):
-                has_any_gen_neighbor = True
-                break
-            if qy == max_qy and has_generation(qx, qy + 1):
-                has_any_gen_neighbor = True
-                break
+            if qx == min_qx:  # Left edge
+                if has_generation(qx - 1, qy):
+                    has_any_gen_neighbor = True
+                    break
+            if qx == max_qx:  # Right edge
+                if has_generation(qx + 1, qy):
+                    has_any_gen_neighbor = True
+                    break
+            if qy == min_qy:  # Top edge
+                if has_generation(qx, qy - 1):
+                    has_any_gen_neighbor = True
+                    break
+            if qy == max_qy:  # Bottom edge
+                if has_generation(qx, qy + 1):
+                    has_any_gen_neighbor = True
+                    break
 
         if has_any_gen_neighbor:
             return (
@@ -587,7 +791,7 @@ def validate_quadrant_selection(
                 None,
             )
 
-        # Valid - place flush
+        # Valid full tile - place at origin
         placement = TemplatePlacement(
             infill_x=0,
             infill_y=0,
@@ -599,7 +803,7 @@ def validate_quadrant_selection(
         placement._primary_quadrants = list(quadrants)
         return True, "Valid selection (full tile)", placement
 
-    # Partial region
+    # Partial region - su TemplateBuilder thong thuong
     builder = TemplateBuilder(region, has_generation)
     placement = builder.find_optimal_placement(allow_expansion=allow_expansion)
 
@@ -627,86 +831,3 @@ def validate_quadrant_selection(
         return True, f"Valid selection (expanded to cover: {padding_str})", placement
 
     return True, "Valid selection", placement
-
-
-# Backward-compat class alias (ten cu: OmniTemplateBuilder)
-class OmniTemplateBuilder(TemplateBuilder):
-    """
-    Alias cho ten cu. Moi code cu dung `OmniTemplateBuilder(...)` se van chay.
-    Logic ghep moi (TemplateBuilder) tu isometric-nyc thay the logic cu.
-    """
-
-    def __init__(
-        self,
-        tile_size: int = TEMPLATE_SIZE,
-        border_width: int = BORDER_WIDTH,
-    ):
-        # NOTE: Constructor signature cu nhan (tile_size, border_width).
-        # Su dung backward-compat wrapper de khong break code cu.
-        # Tuy nhien, TemplateBuilder that su can `region` + `has_generation`
-        # nen caller can su dung `TemplateBuilder` truc tiep.
-        # Constructor nay chi de instantiate config.
-        self.tile_size = tile_size
-        self.border_width = border_width
-
-    # Backward-compat shim: build full template tu render (khi khong co neighbor)
-    def create_full_template(self, render: Image.Image) -> Image.Image:
-        """Backward-compat: tra ve render voi red border toan tile."""
-        template = render.copy().convert("RGBA")
-        # Ve red border full
-        draw = ImageDraw.Draw(template)
-        for i in range(self.border_width):
-            draw.rectangle(
-                [i, i, self.tile_size - 1 - i, self.tile_size - 1 - i],
-                outline=BORDER_COLOR,
-                fill=None,
-            )
-        return template.convert("RGB")
-
-    # Backward-compat shim: build next tile template (cu, KHONG dung cho logic moi)
-    def create_next_tile_template(
-        self,
-        generated_tile: Image.Image,
-        next_render: Image.Image,
-        side: str = "right",
-    ) -> Image.Image:
-        """
-        BACKWARD-COMPAT ONLY.
-        Logic cu sai huong - KHONG nen dung.
-        Moi code moi phai dung `TemplateBuilder` voi `has_generation`/`get_generation`/
-        `get_render` callables de co logic ghep dung.
-        """
-        import warnings
-        warnings.warn(
-            "create_next_tile_template is DEPRECATED. Use TemplateBuilder with "
-            "has_generation/get_render/get_generation callables instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        gen = generated_tile.convert("RGBA")
-        rnd = next_render.convert("RGBA")
-        # Old (incorrect) logic - kept for backward compat
-        W, H = self.tile_size, self.tile_size
-        half = W // 2
-        template = Image.new("RGBA", (W, H))
-        if side == "right":
-            template.paste(gen.crop((half, 0, W, H)), (0, 0))
-            template.paste(rnd.crop((half, 0, W, H)), (half, 0))
-        elif side == "left":
-            template.paste(rnd.crop((0, 0, half, H)), (0, 0))
-            template.paste(gen.crop((0, 0, half, H)), (half, 0))
-        elif side == "top":
-            template.paste(rnd.crop((0, 0, W, half)), (0, half))
-            template.paste(gen.crop((0, 0, W, half)), (0, 0))
-        elif side == "bottom":
-            template.paste(gen.crop((0, half, W, H)), (0, 0))
-            template.paste(rnd.crop((0, half, W, H)), (0, half))
-        # Red border toan tile
-        draw = ImageDraw.Draw(template)
-        for i in range(self.border_width):
-            draw.rectangle(
-                [i, i, W - 1 - i, H - 1 - i],
-                outline=BORDER_COLOR,
-                fill=None,
-            )
-        return template.convert("RGB")
