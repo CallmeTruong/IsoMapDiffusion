@@ -201,20 +201,57 @@ class InferenceConfig:
 
     @property
     def border_width(self) -> int:
-        # border_width default trong TemplateBuilder.build() (isometric-nyc:728)
-        return 2
+        # src/config.py.InfillConfig (default 2)
+        try:
+            from src.config import get_config
+            return int(get_config().infill.border_width)
+        except Exception:
+            return 2
 
     @property
     def border_color(self) -> tuple:
-        # (255, 0, 0, 255) - isometric-nyc/infill_template.py:883
-        return (255, 0, 0, 255)
+        # src/config.py.InfillConfig (default (255, 0, 0, 255))
+        try:
+            from src.config import get_config
+            col = get_config().infill.border_color
+            return tuple(col) if not isinstance(col, tuple) else col
+        except Exception:
+            return (255, 0, 0, 255)
+
+    @property
+    def seam_color(self) -> tuple:
+        # src/config.py.InfillConfig (default (255, 0, 0, 255))
+        try:
+            from src.config import get_config
+            col = get_config().infill.seam_color
+            return tuple(col) if not isinstance(col, tuple) else col
+        except Exception:
+            return (255, 0, 0, 255)
+
+    @property
+    def seam_thickness_px(self) -> int:
+        # src/config.py.InfillConfig (default 1)
+        try:
+            from src.config import get_config
+            return int(get_config().infill.seam_thickness_px)
+        except Exception:
+            return 1
+
+    @property
+    def max_infill_area_ratio(self) -> float:
+        # src/config.py.InfillConfig (default 0.5)
+        try:
+            from src.config import get_config
+            return float(get_config().infill.max_infill_area_ratio)
+        except Exception:
+            return 0.5
 
     @property
     def default_prompt(self) -> str:
-        # Mirror src/constants.py.DEFAULT_PROMPT
+        # src/config.py.InfillConfig.default_prompt
         try:
-            from src.constants import DEFAULT_PROMPT
-            return DEFAULT_PROMPT
+            from src.config import get_config
+            return str(get_config().infill.default_prompt)
         except Exception:
             return (
                 "Fill in the outlined section with coherent pixels matching the "

@@ -212,40 +212,33 @@ class TileTraversal:
 
 def scan_generated_set(gen_dir: Path) -> set[tuple[int, int]]:
     """
-    Scan gen_dir, tra ve set quadrant (qx, qy) cua tiles da gen.
+    Scan gen_dir, return set of quadrant (qx, qy) that are fully generated.
 
-    Moi file `tile_<qx>_<qy>_*.png` la 1 tile 1024x1024 chua 4 quadrants:
-        quadrants: (qx*2, qy*2), (qx*2+1, qy*2),
-                   (qx*2, qy*2+1), (qx*2+1, qy*2+1)
+    CRITICAL: Mỗi file tile_<tile_qx>_<tile_qy>_*.png chứa 4 quadrants:
+      (tile_qx*2,   tile_qy*2)   → top-left
+      (tile_qx*2+1, tile_qy*2)   → top-right
+      (tile_qx*2,   tile_qy*2+1) → bottom-left
+      (tile_qx*2+1, tile_qy*2+1) → bottom-right
     """
     out: set[tuple[int, int]] = set()
     if not gen_dir.exists():
         return out
-    for f in gen_dir.glob("tile_+*_+*_*.png"):
+
+    for f in gen_dir.glob("tile_*_*_*.png"):
         m = TILE_FILENAME_RE.match(f.name)
         if not m:
             continue
-        try:
-            tile_qx = int(m.group(1))
-            tile_qy = int(m.group(2))
-            for ox in (0, 1):
-                for oy in (0, 1):
-                    out.add((tile_qx * 2 + ox, tile_qy * 2 + oy))
-        except ValueError:
+        tile_qx = _sign_int_to_int(m.group(1))
+        tile_qy = _sign_int_to_int(m.group(2))
+        # Verify file is non-empty (avoid counting blank/failed tiles)
+        if f.stat().st_size < 30 * 1024:  # 30KB threshold
             continue
-    # Negative coords: tile_-N_+M_*.png (khong match pattern o tren)
-    for f in gen_dir.glob("tile_-*_+*_*.png"):
-        m = TILE_FILENAME_RE.match(f.name)
-        if not m:
-            continue
-        try:
-            tile_qx = int(m.group(1))  # van doc duoc so am qua regex (\d+ khong match -, nhung \d+ trong pattern `([+-]\d+)` da bao ca signed)
-            tile_qy = int(m.group(2))
-            for ox in (0, 1):
-                for oy in (0, 1):
-                    out.add((tile_qx * 2 + ox, tile_qy * 2 + oy))
-        except ValueError:
-            continue
+        # Tile chứa 4 quadrants
+        out.add((tile_qx * 2,     tile_qy * 2))
+        out.add((tile_qx * 2 + 1, tile_qy * 2))
+        out.add((tile_qx * 2,     tile_qy * 2 + 1))
+        out.add((tile_qx * 2 + 1, tile_qy * 2 + 1))
+
     return out
 
 
@@ -254,17 +247,28 @@ def _sign_int(n: int) -> str:
     return f"+{n}" if n >= 0 else str(n)
 
 
+def _sign_int_to_int(s: str) -> int:
+    """Parse signed-integer string (from filename) -> int.
+
+    Inverse of `_sign_int`. Accepts strings like '+5', '5', '-3', '+0', '0'.
+    """
+    if s.startswith("+"):
+        return int(s[1:])
+    return int(s)
+
+
 def crop_quadrant(img: Image.Image, qx: int, qy: int) -> Image.Image:
     """
-    Cat 1 quadrant 512x512 tu full tile 1024x1024 tai (qx, qy).
+    Crop 512x512 quadrant từ tile 1024x1024.
 
-    Quadrant (qx, qy) nam o (qx*512, qy*512) trong tile 1024x1024
-    (cach to chuc cua isometric-nyc, xem infill_template.py).
+    Quadrant (qx, qy) offset trong tile:
+      left = (qx % 2) * 512  → 0 hoặc 512
+      top  = (qy % 2) * 512  → 0 hoặc 512
     """
     if img.size != (TEMPLATE_SIZE, TEMPLATE_SIZE):
         img = img.resize((TEMPLATE_SIZE, TEMPLATE_SIZE), Image.Resampling.LANCZOS)
     left = (qx % 2) * QUADRANT_SIZE
-    top = (qy % 2) * QUADRANT_SIZE
+    top  = (qy % 2) * QUADRANT_SIZE
     return img.crop((left, top, left + QUADRANT_SIZE, top + QUADRANT_SIZE))
 
 

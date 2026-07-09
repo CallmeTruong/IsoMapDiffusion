@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
+import numpy as np
 from PIL import Image
 from dotenv import load_dotenv
 
@@ -198,6 +199,20 @@ def _load_or_init_tile(gen_dir: Path, tile_qx: int, tile_qy: int) -> Image.Image
     return Image.new("RGB", (TILE_SIZE, TILE_SIZE), (0, 0, 0))
 
 
+def _region_has_content(img: Image.Image, threshold: float = 0.01) -> bool:
+    """
+    Check if a PIL region has non-zero content.
+
+    A region is considered "has content" if mean pixel value > threshold * 255.
+    Default threshold 0.01 = 1% of 255 = 2.55, which catches any non-trivial
+    generated content (pure black = 0, blank tile = 0).
+
+    Used to detect quadrant duplication before stitch.
+    """
+    arr = np.asarray(img.convert("RGB"), dtype=np.float32)
+    return float(arr.mean()) > threshold * 255.0
+
+
 def stitch_quadrant_into_tile(
     quad_img: Image.Image,
     tile_qx: int,
@@ -212,6 +227,25 @@ def stitch_quadrant_into_tile(
     Returns new tile PNG path (hash trong filename).
     """
     tile_img = _load_or_init_tile(gen_dir, tile_qx, tile_qy)
+
+    # Phase 6: detect quadrant duplication - neu quadrant region da co pixel
+    # (mean > 1% of 255) truoc khi paste, log warning de surface duplication bug.
+    existing_region = tile_img.crop(
+        (
+            quad_ox * QUADRANT_SIZE,
+            quad_oy * QUADRANT_SIZE,
+            (quad_ox + 1) * QUADRANT_SIZE,
+            (quad_oy + 1) * QUADRANT_SIZE,
+        )
+    )
+    if _region_has_content(existing_region):
+        log.warning(
+            "[stitch] quadrant (tile_qx=%d, tile_qy=%d, ox=%d, oy=%d) "
+            "already has content - pasting will overwrite. "
+            "Possible duplication if step plan re-visits this quadrant.",
+            tile_qx, tile_qy, quad_ox, quad_oy,
+        )
+
     tile_img.paste(
         quad_img,
         (quad_ox * QUADRANT_SIZE, quad_oy * QUADRANT_SIZE),
@@ -301,57 +335,84 @@ def build_step_template(
     return template, placement, summary
 
 
+def verify_output_size(output_img: Image.Image, placement) -> None:
+    """
+    Verify that model output dimensions match placement.infill_width/height.
+
+    Model output CHI chua infill region pixels (khong phai full template).
+    Model edit pixel trong vung red-border, giu nguyen context pixels.
+
+    Raises a clear error if dimensions do not match.
+    """
+    expected_w = placement.infill_width
+    expected_h = placement.infill_height
+    actual_w, actual_h = output_img.size
+    if (actual_w, actual_h) != (expected_w, expected_h):
+        raise ValueError(
+            f"Model output size mismatch: expected ({expected_w}, {expected_h}) "
+            f"per placement.infill_width/height, got ({actual_w}, {actual_h}). "
+            f"Model output should contain ONLY the infill region (not the full template)."
+        )
+
+
 def crop_quadrants_from_output(
     output_img: Image.Image,
     step: GenerationStep,
     placement,
 ) -> dict[tuple[int, int], Image.Image]:
     """
-    Crop tung quadrant 512x512 tu model output dua vao placement.
+    Crop quadrants tu model output.
 
-    Placement.infill_x/y/width/height cho biet vi tri infill trong template 1024x1024.
-    Step.quadrants cho biet 1/2/4 quadrants nam o vi tri nao trong infill rect
-    (theo quadrant grid alignment).
+    CRITICAL: Model output CHI chua infill region pixels (khong phai full template).
+    Model edit pixel trong vung red-border, giu nguyen context pixels.
+
+    Vi vy crop coordinates phai tinh tu (0,0) trong output,
+    KHONG phai tu placement.infill_x/y.
     """
-    if output_img.size != (TILE_SIZE, TILE_SIZE):
-        output_img = output_img.resize(
-            (TILE_SIZE, TILE_SIZE), Image.Resampling.LANCZOS
-        )
+    verify_output_size(output_img, placement)
 
-    # Vi tri infill trong output (sau khi model tra ve)
-    infill_x = placement.infill_x
-    infill_y = placement.infill_y
-    infill_w = placement.infill_width
-    infill_h = placement.infill_height
+    crops: dict[tuple[int, int], Image.Image] = {}
 
-    # Quadrant grid: moi quadrant 512, can trong infill_w x infill_h
-    # Step.quadrants duoc sort theo (y, x) de mapping on dinh
+    # Sort quadrants by position
     sorted_quads = sorted(step.quadrants, key=lambda p: (p.y, p.x))
 
-    # Bounds cua step quadrants trong quadrant coords
     min_qx = min(q.x for q in step.quadrants)
-    max_qx = max(q.x for q in step.quadrants)
     min_qy = min(q.y for q in step.quadrants)
+    max_qx = max(q.x for q in step.quadrants)
     max_qy = max(q.y for q in step.quadrants)
+
     w_quads = max_qx - min_qx + 1  # 1 hoac 2
     h_quads = max_qy - min_qy + 1  # 1 hoac 2
 
-    quad_w = infill_w // w_quads
-    quad_h = infill_h // h_quads
+    # Kich thuoc moi quadrant trong output
+    quad_w = QUADRANT_SIZE  # Luon 512
+    quad_h = QUADRANT_SIZE
 
-    crops: dict[tuple[int, int], Image.Image] = {}
     for q in sorted_quads:
-        # Vi tri quadrant trong infill rect (0..w_quads-1, 0..h_quads-1)
-        local_x = q.x - min_qx
-        local_y = q.y - min_qy
-        x0 = infill_x + local_x * quad_w
-        y0 = infill_y + local_y * quad_h
-        crop = output_img.crop((x0, y0, x0 + QUADRANT_SIZE, y0 + QUADRANT_SIZE))
+        local_x = q.x - min_qx  # 0 hoac 1
+        local_y = q.y - min_qy  # 0 hoac 1
+
+        # Vi tri crop trong output image (tu (0,0), khong phai placement.infill_x/y)
+        x0 = local_x * quad_w
+        y0 = local_y * quad_h
+
+        crop = output_img.crop((
+            x0, y0,
+            x0 + QUADRANT_SIZE,
+            y0 + QUADRANT_SIZE
+        ))
+
+        # Resize neu can
         if crop.size != (QUADRANT_SIZE, QUADRANT_SIZE):
             crop = crop.resize(
-                (QUADRANT_SIZE, QUADRANT_SIZE), Image.Resampling.LANCZOS
+                (QUADRANT_SIZE, QUADRANT_SIZE),
+                Image.Resampling.LANCZOS
             )
+
         crops[(q.x, q.y)] = crop
+
+    # Use w_quads/h_quads to silence linters (kept for completeness/symmetry)
+    _ = (w_quads, h_quads)
 
     return crops
 

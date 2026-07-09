@@ -25,23 +25,25 @@ class GenerationClient:
     def __init__(
         self,
         base_url: str,
-        timeout: int = 300,
+        timeout: int = 600,
+        connect_timeout: int = 60,
         default_steps: int = 14,
         default_guidance: float = 3.0,
-        max_connections: int = 100,
-        max_keepalive: int = 20,
+        max_connections: int = 10,
+        max_keepalive: int = 5,
     ):
         """
         Args:
             base_url: Base URL of inference server.
             timeout: Request timeout in seconds.
+            connect_timeout: Connection timeout in seconds (important for SSH tunnels).
             default_steps: Default inference steps.
             default_guidance: Default guidance scale.
-            max_connections: Max total connections (affects concurrency).
+            max_connections: Max total connections (keep low for SSH tunnels).
             max_keepalive: Max keep-alive connections (for connection reuse).
         """
         self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
+        self.timeout = httpx.Timeout(timeout, connect=connect_timeout)
         self.default_steps = default_steps
         self.default_guidance = default_guidance
         self._client: Optional[httpx.AsyncClient] = None
