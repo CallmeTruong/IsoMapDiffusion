@@ -15,6 +15,11 @@ class GenerationClient:
     Usage:
         client = GenerationClient("http://gpu-server:8000")
         result = await client.edit(template_image, prompt)
+
+    Features:
+        - Connection pooling for improved throughput
+        - Keep-alive connections to avoid TCP handshake overhead
+        - Configurable concurrency limits
     """
 
     def __init__(
@@ -23,11 +28,36 @@ class GenerationClient:
         timeout: int = 300,
         default_steps: int = 14,
         default_guidance: float = 3.0,
+        max_connections: int = 100,
+        max_keepalive: int = 20,
     ):
+        """
+        Args:
+            base_url: Base URL of inference server.
+            timeout: Request timeout in seconds.
+            default_steps: Default inference steps.
+            default_guidance: Default guidance scale.
+            max_connections: Max total connections (affects concurrency).
+            max_keepalive: Max keep-alive connections (for connection reuse).
+        """
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.default_steps = default_steps
         self.default_guidance = default_guidance
+        self._client: Optional[httpx.AsyncClient] = None
+        self._limits = httpx.Limits(
+            max_keepalive_connections=max_keepalive,
+            max_connections=max_connections,
+        )
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get or create the shared HTTP client with connection pooling."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=self.timeout,
+                limits=self._limits,
+            )
+        return self._client
 
     async def edit(
         self,
@@ -77,11 +107,11 @@ class GenerationClient:
         if seed is not None:
             payload["seed"] = seed
 
-        # Call API
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(f"{self.base_url}/edit", json=payload)
-            response.raise_for_status()
-            result = response.json()
+        # Call API using pooled connection
+        client = await self._get_client()
+        response = await client.post(f"{self.base_url}/edit", json=payload)
+        response.raise_for_status()
+        result = response.json()
 
         # Decode result
         result_b64 = result["image_b64"]
@@ -90,17 +120,17 @@ class GenerationClient:
 
     async def health_check(self) -> dict:
         """Check server health status."""
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(f"{self.base_url}/health")
-            response.raise_for_status()
-            return response.json()
+        client = await self._get_client()
+        response = await client.get(f"{self.base_url}/health")
+        response.raise_for_status()
+        return response.json()
 
     async def list_models(self) -> dict:
         """List available models on server."""
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(f"{self.base_url}/models")
-            response.raise_for_status()
-            return response.json()
+        client = await self._get_client()
+        response = await client.get(f"{self.base_url}/models")
+        response.raise_for_status()
+        return response.json()
 
     async def wait_for_server(self, timeout: float = 60.0) -> bool:
         """
@@ -122,10 +152,22 @@ class GenerationClient:
 
         return False
 
+    async def close(self) -> None:
+        """Close the HTTP client and release connections."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        await self.close()
+
 
 # Synchronous wrapper for non-async contexts
 class SyncGenerationClient:
-    """Synchronous version of GenerationClient."""
+    """Synchronous version of GenerationClient with connection pooling."""
 
     def __init__(
         self,
@@ -133,12 +175,36 @@ class SyncGenerationClient:
         timeout: int = 300,
         default_steps: int = 14,
         default_guidance: float = 3.0,
+        max_connections: int = 100,
+        max_keepalive: int = 20,
     ):
+        """
+        Args:
+            base_url: Base URL of inference server.
+            timeout: Request timeout in seconds.
+            default_steps: Default inference steps.
+            default_guidance: Default guidance scale.
+            max_connections: Max total connections.
+            max_keepalive: Max keep-alive connections.
+        """
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.default_steps = default_steps
         self.default_guidance = default_guidance
-        self._client = httpx.Client(timeout=timeout)
+        self._client: Optional[httpx.Client] = None
+        self._limits = httpx.Limits(
+            max_keepalive_connections=max_keepalive,
+            max_connections=max_connections,
+        )
+
+    def _get_client(self) -> httpx.Client:
+        """Get or create the shared HTTP client with connection pooling."""
+        if self._client is None:
+            self._client = httpx.Client(
+                timeout=self.timeout,
+                limits=self._limits,
+            )
+        return self._client
 
     def edit(
         self,
@@ -150,7 +216,7 @@ class SyncGenerationClient:
         true_cfg_scale: float = 2.0,
         seed: Optional[int] = None,
     ) -> Image.Image:
-        """Synchronous version of edit()."""
+        """Synchronous version of edit() with pooled connections."""
         steps = steps or self.default_steps
         guidance_scale = guidance_scale or self.default_guidance
 
@@ -174,8 +240,9 @@ class SyncGenerationClient:
         if seed is not None:
             payload["seed"] = seed
 
-        # Call API
-        response = self._client.post(f"{self.base_url}/edit", json=payload)
+        # Call API using pooled connection
+        client = self._get_client()
+        response = client.post(f"{self.base_url}/edit", json=payload)
         response.raise_for_status()
         result = response.json()
 
@@ -186,13 +253,16 @@ class SyncGenerationClient:
 
     def health_check(self) -> dict:
         """Check server health."""
-        response = self._client.get(f"{self.base_url}/health")
+        client = self._get_client()
+        response = client.get(f"{self.base_url}/health")
         response.raise_for_status()
         return response.json()
 
     def close(self):
         """Close the HTTP client."""
-        self._client.close()
+        if self._client is not None:
+            self._client.close()
+            self._client = None
 
     def __enter__(self):
         return self

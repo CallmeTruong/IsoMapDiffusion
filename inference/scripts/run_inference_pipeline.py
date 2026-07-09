@@ -483,7 +483,12 @@ async def run(args: argparse.Namespace) -> None:
     )
 
     # Server + caches
-    client = GenerationClient(args.endpoint, timeout=args.timeout)
+    client = GenerationClient(
+        args.endpoint,
+        timeout=args.timeout,
+        max_connections=args.concurrency + 10,
+        max_keepalive=args.concurrency,
+    )
     await wait_for_server(client, timeout_s=args.server_wait)
     sem = asyncio.Semaphore(args.concurrency)
 
@@ -499,109 +504,115 @@ async def run(args: argparse.Namespace) -> None:
     step_types_count: dict[str, int] = {}
 
     # Main loop - SEQUENTIAL (deterministic cho tile_placement rules)
-    while not traversal.is_complete():
-        step = traversal.get_next_step()
-        if step is None:
-            log.warning(
-                "Traversal stuck: no next step but %d quadrants remaining.",
-                traversal.progress[1] - traversal.progress[0],
+    # Note: concurrency param is for future parallelization via queued set in plan
+    try:
+        while not traversal.is_complete():
+            step = traversal.get_next_step()
+            if step is None:
+                log.warning(
+                    "Traversal stuck: no next step but %d quadrants remaining.",
+                    traversal.progress[1] - traversal.progress[0],
+                )
+                break
+
+            # Optional: skip step neu TOAN BO quadrants cua no da co trong state
+            # (truong hop on-disk partial)
+            already_done = all(
+                (q.x, q.y) in done_quadrants for q in step.quadrants
             )
-            break
-
-        # Optional: skip step neu TOAN BO quadrants cua no da co trong state
-        # (truong hop on-disk partial)
-        already_done = all(
-            (q.x, q.y) in done_quadrants for q in step.quadrants
-        )
-        if already_done:
-            # Skip nhanh, khong goi server
-            traversal.mark_done([(q.x, q.y) for q in step.quadrants])
-            continue
-
-        ok, summary, crops = await generate_step(
-            client,
-            renders_dir, gen_dir,
-            render_cache, generation_cache,
-            args.prompt,
-            step,
-            sem,
-        )
-
-        if ok and crops is not None:
-            # Stitch tung quadrant vao tile PNG tuong ung
-            stitch_failed = []
-            for (qx, qy), quad_img in crops.items():
-                tile_qx = qx // 2
-                tile_qy = qy // 2
-                quad_ox = qx % 2
-                quad_oy = qy % 2
-                try:
-                    stitch_quadrant_into_tile(
-                        quad_img, tile_qx, tile_qy, quad_ox, quad_oy, gen_dir
-                    )
-                    done_quadrants.add((qx, qy))
-                    state["done_quadrants"][f"{qx},{qy}"] = True
-                except OSError as e:
-                    stitch_failed.append((qx, qy, str(e)))
-
-            if stitch_failed:
-                # Stitch failed -> revert mark_done
-                for qx, qy, _ in stitch_failed:
-                    state["done_quadrants"].pop(f"{qx},{qy}", None)
-                done_quadrants.difference_update((q[0], q[1]) for q in stitch_failed)
-                traversal.quadrant_state.mark_generated(
-                    (q[0], q[1]) for q in stitch_failed  # remove them so plan re-places
-                )
-                traversal.quadrant_state._generated.difference_update(
-                    (q[0], q[1]) for q in stitch_failed
-                )
-                traversal._current_plan = traversal._build_plan()
-                traversal._step_index = 0
-                failed_steps += 1
-                log.warning("[step %s] stitch failures: %s",
-                            step.step_type, stitch_failed)
+            if already_done:
+                # Skip nhanh, khong goi server
+                traversal.mark_done([(q.x, q.y) for q in step.quadrants])
                 continue
 
-            # Mark done (4/2/1 quadrants)
-            traversal.mark_done([(q.x, q.y) for q in step.quadrants])
-            completed_quads += len(step.quadrants)
-            completed_steps += 1
-            step_types_count[step.step_type] = (
-                step_types_count.get(step.step_type, 0) + 1
+            ok, summary, crops = await generate_step(
+                client,
+                renders_dir, gen_dir,
+                render_cache, generation_cache,
+                args.prompt,
+                step,
+                sem,
             )
-            # Clear cache vi gen_dir vua thay doi
-            generation_cache.clear()
 
-            log.info(
-                "[step %d: %s quads=%d] %s | done %d/%d quads | tiles-remaining=%d",
-                completed_steps,
-                step.step_type,
-                len(step.quadrants),
-                summary,
-                completed_quads,
-                traversal.progress[1],
-                sum(
-                    1 for tqx, tqy in tiles
-                    if not all(
-                        (tqx * 2 + ox, tqy * 2 + oy) in done_quadrants
-                        for ox in (0, 1) for oy in (0, 1)
+            if ok and crops is not None:
+                # Stitch tung quadrant vao tile PNG tuong ung
+                stitch_failed = []
+                for (qx, qy), quad_img in crops.items():
+                    tile_qx = qx // 2
+                    tile_qy = qy // 2
+                    quad_ox = qx % 2
+                    quad_oy = qy % 2
+                    try:
+                        stitch_quadrant_into_tile(
+                            quad_img, tile_qx, tile_qy, quad_ox, quad_oy, gen_dir
+                        )
+                        done_quadrants.add((qx, qy))
+                        state["done_quadrants"][f"{qx},{qy}"] = True
+                    except OSError as e:
+                        stitch_failed.append((qx, qy, str(e)))
+
+                if stitch_failed:
+                    # Stitch failed -> revert mark_done
+                    for qx, qy, _ in stitch_failed:
+                        state["done_quadrants"].pop(f"{qx},{qy}", None)
+                    done_quadrants.difference_update((q[0], q[1]) for q in stitch_failed)
+                    traversal.quadrant_state.mark_generated(
+                        (q[0], q[1]) for q in stitch_failed  # remove them so plan re-places
                     )
-                ),
-            )
-        else:
-            failed_steps += 1
-            log.warning(
-                "[step %s quads=%s] FAIL err=%s",
-                step.step_type,
-                [(q.x, q.y) for q in step.quadrants],
-                summary,
-            )
+                    traversal.quadrant_state._generated.difference_update(
+                        (q[0], q[1]) for q in stitch_failed
+                    )
+                    traversal._current_plan = traversal._build_plan()
+                    traversal._step_index = 0
+                    failed_steps += 1
+                    log.warning("[step %s] stitch failures: %s",
+                                step.step_type, stitch_failed)
+                    continue
 
-        # Periodic state save
-        now = time.monotonic()
-        if now - last_save >= args.state_save_interval:
-            save_state(state_path, state)
-            last_save = now
+                # Mark done (4/2/1 quadrants)
+                traversal.mark_done([(q.x, q.y) for q in step.quadrants])
+                completed_quads += len(step.quadrants)
+                completed_steps += 1
+                step_types_count[step.step_type] = (
+                    step_types_count.get(step.step_type, 0) + 1
+                )
+                # Clear cache vi gen_dir vua thay doi
+                generation_cache.clear()
+
+                log.info(
+                    "[step %d: %s quads=%d] %s | done %d/%d quads | tiles-remaining=%d",
+                    completed_steps,
+                    step.step_type,
+                    len(step.quadrants),
+                    summary,
+                    completed_quads,
+                    traversal.progress[1],
+                    sum(
+                        1 for tqx, tqy in tiles
+                        if not all(
+                            (tqx * 2 + ox, tqy * 2 + oy) in done_quadrants
+                            for ox in (0, 1) for oy in (0, 1)
+                        )
+                    ),
+                )
+            else:
+                failed_steps += 1
+                log.warning(
+                    "[step %s quads=%s] FAIL err=%s",
+                    step.step_type,
+                    [(q.x, q.y) for q in step.quadrants],
+                    summary,
+                )
+
+            # Periodic state save
+            now = time.monotonic()
+            if now - last_save >= args.state_save_interval:
+                save_state(state_path, state)
+                last_save = now
+
+    finally:
+        # Cleanup: close HTTP client
+        await client.close()
 
     save_state(state_path, state)
 
@@ -641,8 +652,8 @@ def parse_args() -> argparse.Namespace:
                    help="Inference server URL (default: from INFERENCE_ENDPOINT env var).")
     p.add_argument("--prompt", type=str, default=None,
                    help="Edit prompt (default: from src.constants.DEFAULT_PROMPT).")
-    p.add_argument("--concurrency", type=int, default=1,
-                   help="Max in-flight requests (default: 1).")
+    p.add_argument("--concurrency", type=int, default=4,
+                   help="Max in-flight requests (default: 4). Note: plan-based generation is sequential; this is for connection pooling.")
     p.add_argument("--tile-size", type=int, default=1024,
                    help="Tile size in pixels (default: 1024).")
     p.add_argument("--timeout", type=int, default=300,
