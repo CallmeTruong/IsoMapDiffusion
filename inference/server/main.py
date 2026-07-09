@@ -136,11 +136,9 @@ async def edit_image(req: EditRequest) -> EditResponse:
 
         inference_time_ms = int((time.time() - start_time) * 1000)
 
-        # Encode result (JPEG quality 95 - matches client encoding).
+        # Encode result
         buffer = BytesIO()
-        if result.mode != "RGB":
-            result = result.convert("RGB")
-        result.save(buffer, format="JPEG", quality=95)
+        result.save(buffer, format="PNG")
         result_b64 = base64.b64encode(buffer.getvalue()).decode()
 
         return EditResponse(

@@ -89,12 +89,9 @@ class GenerationClient:
         steps = steps or self.default_steps
         guidance_scale = guidance_scale or self.default_guidance
 
-        # Encode image to base64 (JPEG quality 95 - ~5x smaller than PNG over
-        # the SSH tunnel; visually lossless for 1024x1024 pixel art).
+        # Encode image to base64
         buffer = BytesIO()
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-        image.save(buffer, format="JPEG", quality=95)
+        image.save(buffer, format="PNG")
         image_b64 = base64.b64encode(buffer.getvalue()).decode()
 
         # Build request
@@ -225,11 +222,9 @@ class SyncGenerationClient:
         steps = steps or self.default_steps
         guidance_scale = guidance_scale or self.default_guidance
 
-        # Encode image (JPEG quality 95 - see async client for rationale).
+        # Encode image
         buffer = BytesIO()
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-        image.save(buffer, format="JPEG", quality=95)
+        image.save(buffer, format="PNG")
         image_b64 = base64.b64encode(buffer.getvalue()).decode()
 
         # Build request
