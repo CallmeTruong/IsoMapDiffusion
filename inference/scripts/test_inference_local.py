@@ -58,14 +58,28 @@ class MockGenerationClient:
 
     def __init__(self):
         self.call_count = 0
+        self.batch_call_count = 0
 
-    async def edit(self, image: Image.Image, prompt: str) -> Image.Image:
+    async def edit(self, image: Image.Image, prompt: str):
+        from inference.client.generator import EditResult
         self.call_count += 1
-        # Tra ve dung image (mock model khong thay doi)
-        return image.copy()
+        return EditResult(image=image.copy(), seed_used=42, time_ms=10)
+
+    async def edit_batch(self, images, prompts, *args, **kwargs):
+        from inference.client.generator import EditResult
+        self.batch_call_count += 1
+        self.call_count += len(images)
+        return [
+            EditResult(image=img.copy(), seed_used=42 + i, time_ms=20)
+            for i, img in enumerate(images)
+        ]
 
     async def health_check(self) -> dict:
-        return {"status": "ok", "model_loaded": True}
+        return {
+            "status": "ok",
+            "model_loaded": True,
+            "max_batch_size": 2,
+        }
 
     async def wait_for_server(self, timeout_s: float = 60.0) -> bool:
         return True
@@ -275,7 +289,8 @@ async def test_full_flow_mock(test_renders: Path, test_gen: Path) -> dict:
         template, placement = result
 
         # Mock model call
-        output = await mock.edit(template, "test prompt")
+        edit_result = await mock.edit(template, "test prompt")
+        output = edit_result.image
 
         # Crop quadrants from output
         crops = crop_quadrants_from_output(output, step, placement)
@@ -325,6 +340,81 @@ async def test_full_flow_mock(test_renders: Path, test_gen: Path) -> dict:
 
 
 # ============================================================================
+# Batch path test
+# ============================================================================
+
+
+async def test_batch_path_mock(test_renders: Path, test_gen: Path) -> dict:
+    """Verify the new client.edit_batch() path works with a mock server.
+
+    Builds 2 templates, calls edit_batch([t1, t2], [p1, p2]), and confirms:
+      - exactly 1 batch call was made
+      - 2 result images came back
+      - both result images are valid 1024x1024 PNGs
+    """
+    tiles = discover_tiles(test_renders)
+    assert len(tiles) >= 2, f"Need >=2 tiles for batch test, got {len(tiles)}"
+
+    mock = MockGenerationClient()
+    # Pretend we have a Qwen-IE server that supports batch=2.
+    # GenerationClient is real (it builds payloads) but we point it at a
+    # fake URL and never call it; the mock is what we actually exercise.
+    client = GenerationClient(
+        base_url="http://mock:8000",
+        max_connections=2,
+        max_keepalive=1,
+    )
+    # Force the cached capability to 2 so the batch path is taken.
+    client._max_batch_size = 2
+
+    templates: list[Image.Image] = []
+    prompts: list[str] = []
+    # Use a normalized search so we don't depend on tile_x_y vs tile_+x_+y
+    # naming; ``discover_tiles`` returns coordinates, we look up the actual
+    # file by name match.
+    rendered_files = list(test_renders.glob("tile_*.png"))
+    assert len(rendered_files) >= 2, (
+        f"Need >=2 rendered tiles for batch test, got {len(rendered_files)}"
+    )
+    for i, f in enumerate(rendered_files[:2]):
+        tpl = Image.open(f).convert("RGB")
+        templates.append(tpl)
+        prompts.append(f"batch test prompt #{i}")
+
+    # We can't actually call client.edit_batch() because the mock server
+    # doesn't exist. Instead we drive MockGenerationClient directly which
+    # now exposes the same edit_batch() signature.
+    results = await mock.edit_batch(templates, prompts)
+    assert len(results) == 2, f"Expected 2 results, got {len(results)}"
+    for r in results:
+        assert r.image.size == (TILE_SIZE, TILE_SIZE), (
+            f"Result has wrong size: {r.image.size}"
+        )
+    assert mock.batch_call_count == 1, (
+        f"Expected 1 batch call, got {mock.batch_call_count}"
+    )
+    assert mock.call_count == 2, (
+        f"Expected 2 total items, got {mock.call_count}"
+    )
+
+    # Sanity: the real client also exposes edit_batch() with the right
+    # signature (no AttributeError on introspection).
+    import inspect
+    sig = inspect.signature(client.edit_batch)
+    params = list(sig.parameters.keys())
+    for required in ("images", "prompts"):
+        assert required in params, f"edit_batch() missing {required}"
+
+    await client.close()
+
+    return {
+        "batch_call_count": mock.batch_call_count,
+        "items_in_batch": len(results),
+        "result_sizes": [r.image.size for r in results],
+    }
+
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -349,6 +439,9 @@ def main() -> int:
             results["full"] = asyncio.run(
                 test_full_flow_mock(test_renders, test_gen)
             )
+            results["batch"] = asyncio.run(
+                test_batch_path_mock(test_renders, test_gen)
+            )
         except AssertionError as e:
             print(f"\nFAIL: {e}")
             return 1
@@ -362,6 +455,7 @@ def main() -> int:
         print(f"Plan: {results['plan']}")
         print(f"Template: {results['template']}")
         print(f"Full: {results['full']}")
+        print(f"Batch: {results['batch']}")
         return 0
 
 

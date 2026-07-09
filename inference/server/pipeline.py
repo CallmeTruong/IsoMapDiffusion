@@ -2,7 +2,11 @@
 
 Optimizations applied (zero quality loss, see docs/SYSTEM_REFERENCE.md §13):
   1. torch.compile on transformer (+20-40% per step)
-  2. SDPA / Flash-Attn attention processor (+15-25%)
+  2. SDPA / Flash-Attn (+15-25%) — diffusers' default attention processor
+     already calls torch.nn.functional.scaled_dot_product_attention on
+     PyTorch >= 2.0, so PyTorch picks the fastest backend at runtime.
+     We only flip the three CUDA SDP backends on and log which processor
+     is installed.
   3. VAE tiling + slicing (+5-10%, lower decode peak)
 
 Memory layout is controlled by the OFFLOAD_MODE env var (case-insensitive):
@@ -23,8 +27,9 @@ import gc
 import os
 import random
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Sequence, Union
 
 import torch
 from diffusers import QwenImageEditPipeline
@@ -50,6 +55,7 @@ class QwenEditPipeline:
         lora_weight: float = 1.0,
         dtype: str = "bfloat16",
         device: str = "cuda",
+        max_batch_size: int = 2,
     ):
         self.base_model = base_model
         self.lora_path = lora_path
@@ -58,6 +64,11 @@ class QwenEditPipeline:
         self.dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
         self.device = device
         self.pipe: Optional[QwenImageEditPipeline] = None
+        # Cap for batched requests; A100-80GB comfortably handles 2 tiles per
+        # call (model ~20GB + 2× activations ~25GB). Bigger batches on
+        # A100-80GB are possible but cost more VRAM and risk OOM on long
+        # prompts. Server validates incoming batch size against this.
+        self.max_batch_size = max_batch_size
 
     def load(self) -> None:
         """Load the base pipeline and attach LoRA weights. Raises if LoRA fails to load."""
@@ -86,20 +97,74 @@ class QwenEditPipeline:
             )
 
         # ------------------------------------------------------------------
-        # OPTIMIZATION 2: SDPA / Flash-Attn attention processor (+15-25%)
-        # Force the PyTorch 2.x scaled-dot-product attention backend instead of
-        # the eager attention path that Qwen-IE may pick otherwise.
+        # OPTIMIZATION 2: SDPA / Flash-Attn (+15-25%)
+        # Strategy: do NOT call set_attn_processor. In modern diffusers
+        # (>=0.27) the transformer ships with an attention processor that
+        # already dispatches through torch.nn.functional.scaled_dot_product_attention
+        # when PyTorch >= 2.0 is installed. PyTorch then picks the fastest
+        # available backend (Flash-Attn 2 > mem-efficient > math) based on
+        # the input shape/dtype.
+        #
+        # We just:
+        #   1. Make sure all three CUDA SDP backends are enabled.
+        #   2. Log which processor is currently installed so we can verify.
+        #   3. If somehow the default is the plain eager AttnProcessor, fall
+        #      back to AttnProcessor2_0 (still better than vanilla).
         # ------------------------------------------------------------------
         if _opt_enabled("SDPA"):
             try:
-                from diffusers.models.attention_processor import AttnProcessor2_0
-                self.pipe.transformer.set_attn_processor(AttnProcessor2_0())
-                print("Opt-2: SDPA AttnProcessor2_0 enabled on transformer")
+                torch.backends.cuda.enable_flash_sdp(True)
+                torch.backends.cuda.enable_mem_efficient_sdp(True)
+                torch.backends.cuda.enable_math_sdp(True)
+
+                current = None
+                if hasattr(self.pipe, "transformer") and self.pipe.transformer is not None:
+                    proc_attr = getattr(
+                        self.pipe.transformer, "attn_processor", None
+                    )
+                    if isinstance(proc_attr, dict) and proc_attr:
+                        current = type(next(iter(proc_attr.values()))).__name__
+                    elif proc_attr is not None:
+                        current = type(proc_attr).__name__
+
+                # Fallback only if the default processor is the slowest one.
+                if current == "AttnProcessor":
+                    try:
+                        from diffusers.models.attention_processor import (
+                            AttnProcessor2_0,
+                        )
+                        self.pipe.transformer.set_attn_processor(AttnProcessor2_0())
+                        print(
+                            "Opt-2: default was eager AttnProcessor; "
+                            "upgraded to AttnProcessor2_0"
+                        )
+                        current = "AttnProcessor2_0"
+                    except Exception as e:
+                        print(
+                            f"Opt-2: AttnProcessor2_0 upgrade failed ({e}); "
+                            "keeping default"
+                        )
+
+                backend_hint = "auto (PyTorch picks at runtime)"
+                try:
+                    import importlib.util
+                    if importlib.util.find_spec("flash_attn") is not None:
+                        backend_hint = "flash-attn 2 (preferred)"
+                    else:
+                        backend_hint = "mem-efficient SDPA (flash_attn not installed)"
+                except Exception:
+                    pass
+
+                print(
+                    "Opt-2: SDPA active — diffusers default processor "
+                    f"({current or 'unknown'}); CUDA SDP backends enabled "
+                    f"(flash / mem-efficient / math); runtime pick: {backend_hint}"
+                )
             except Exception as e:
                 print(f"Opt-2: SDPA setup failed ({e}); using default attention")
 
         # ------------------------------------------------------------------
-        # OPTIMIZATION 4: VAE tiling + slicing (+5-10%, lower decode peak)
+        # OPTIMIZATION 4: VAE tiling + slicing
         # Splits VAE encode/decode into tiles so peak activation memory drops.
         # Output is bit-identical to the non-tiled path.
         # ------------------------------------------------------------------
@@ -159,8 +224,15 @@ class QwenEditPipeline:
         # OPTIMIZATION 1: torch.compile on transformer (+20-40%)
         # Applied LAST so it sees the final graph layout after offload hooks.
         # Cold-start cost: ~3-5 min one-time. Pays off after the first
-        # request. Uses 'reduce-overhead' mode (A40 friendly; cudagraphs in
-        # 'max-autotune' would add overhead on non-Hopper cards).
+        # request.
+        #
+        # Modes:
+        #   'reduce-overhead' (default) - safe on A40; uses CUDA graphs
+        #     but no autotuning; ~3-5 min cold start.
+        #   'max-autotune' - aggressive autotuning, fuses ops, ~5-10 min
+        #     cold start. Only worth it on >= A100 GPUs and when running
+        #     with batch_size >= 2 (so batched batches benefit from the
+        #     optimized kernels). Set ENABLE_TORCH_COMPILE_OPT=max-autotune.
         # ------------------------------------------------------------------
         if _opt_enabled("TORCH_COMPILE"):
             try:
@@ -168,13 +240,30 @@ class QwenEditPipeline:
                     hasattr(self.pipe, "transformer")
                     and self.pipe.transformer is not None
                 ):
+                    raw_mode = os.environ.get("ENABLE_TORCH_COMPILE_OPT", "1").strip().lower()
+                    # Allow verbose mode strings: "max-autotune", "reduce-overhead", "default", etc.
+                    if raw_mode in ("0", "1", "true", "false", "yes", "no", "on", "off"):
+                        mode = "reduce-overhead"  # default boolean opt-in
+                        dynamic = True
+                        label = "reduce-overhead"
+                    else:
+                        # Treat raw_mode as a torch.compile mode string.
+                        mode = raw_mode
+                        # 'max-autotune' shapes are expected to be static.
+                        # We still keep dynamic=True because Qwen-IE latent
+                        # shapes vary per denoising step, but cuda graphs
+                        # still benefit from autotuned kernels.
+                        dynamic = True
+                        label = raw_mode
                     self.pipe.transformer = torch.compile(
                         self.pipe.transformer,
-                        mode="reduce-overhead",
-                        dynamic=True,  # latent shapes vary per step
+                        mode=mode,
+                        dynamic=dynamic,
                     )
-                    print("Opt-1: torch.compile enabled on transformer "
-                          "(~3-5 min one-time compile on first request)")
+                    print(
+                        f"Opt-1: torch.compile enabled (mode={label}, "
+                        f"~3-10 min one-time compile on first request)"
+                    )
             except Exception as e:
                 print(f"Opt-1: torch.compile failed ({e}); continuing without")
 
@@ -189,68 +278,208 @@ class QwenEditPipeline:
         steps: int = 14,
         guidance_scale: float = 3.0,
         seed: Optional[int] = None,
-    ) -> Image.Image:
+    ) -> "EditResult":
         """
         Run inference to edit the image based on prompt.
 
-        Args:
-            image: Input PIL Image
-            prompt: Edit instruction
-            negative_prompt: What to avoid
-            true_cfg_scale: True CFG scale
-            steps: Number of inference steps
-            guidance_scale: Guidance scale
-            seed: Random seed (uses random if None)
+        Returns:
+            EditResult(image, seed_used, time_ms). seed_used is the actual
+            seed that was used (random if input seed was None) so callers
+            can reproduce the result.
+        """
+        result = self._run_pipeline_batched(
+            images=[image],
+            prompts=[prompt],
+            negative_prompts=[negative_prompt] if negative_prompt is not None else [None],
+            true_cfg_scale=true_cfg_scale,
+            steps=steps,
+            guidance_scale=guidance_scale,
+            seeds=[seed] if seed is not None else [None],
+        )
+        # _run_pipeline_batched returns one EditResult per item.
+        return result[0]
+
+    def edit_batch(
+        self,
+        images: Sequence[Image.Image],
+        prompts: Sequence[str],
+        negative_prompts: Optional[Sequence[Optional[str]]] = None,
+        true_cfg_scale: Union[float, Sequence[float]] = 2.0,
+        steps: int = 14,
+        guidance_scale: Union[float, Sequence[float]] = 3.0,
+        seeds: Optional[Sequence[Optional[int]]] = None,
+    ) -> List["EditResult"]:
+        """
+        Batched inference: process N tiles in a single pipeline call.
+
+        All items in a batch share `steps`. `true_cfg_scale`, `guidance_scale`,
+        `negative_prompt` and `seed` may be either a single value broadcast to
+        every item, or a sequence with one entry per item.
 
         Returns:
-            Edited PIL Image
+            List of EditResult(image, seed_used, time_ms), one per input item.
+
+        Why batching helps: Qwen-IE transformer steps are bandwidth-bound
+        (loading weights from HBM each denoising step). Doubling the batch
+        size ~doubles the time, not quadruples it, because the per-step
+        weight-load cost is amortized across the batch. A100-80GB is big
+        enough for batch=2 in BF16 (model ~20GB + 2× activations ~25GB).
         """
         if self.pipe is None:
             raise RuntimeError("Pipeline not loaded. Call load() first.")
-
-        gc.collect()
-        torch.cuda.empty_cache()
-
-        if seed is None:
-            seed = random.randint(0, 2**32 - 1)
-
-        generator = torch.Generator(device=self.device).manual_seed(seed)
-
-        print(
-            f"Editing: prompt='{prompt[:50]}...' seed={seed} "
-            f"steps={steps} cfg={guidance_scale} tcfg={true_cfg_scale}"
+        if len(images) != len(prompts):
+            raise ValueError(
+                f"images and prompts length mismatch: "
+                f"{len(images)} vs {len(prompts)}"
+            )
+        if len(images) == 0:
+            return []
+        return self._run_pipeline_batched(
+            images=list(images),
+            prompts=list(prompts),
+            negative_prompts=list(negative_prompts) if negative_prompts is not None else None,
+            true_cfg_scale=true_cfg_scale,
+            steps=steps,
+            guidance_scale=guidance_scale,
+            seeds=list(seeds) if seeds is not None else None,
         )
 
-        # Log per-request timing to help compare before/after optimizations
+    def _run_pipeline_batched(
+        self,
+        images: List[Image.Image],
+        prompts: List[str],
+        negative_prompts: Optional[List[Optional[str]]],
+        true_cfg_scale: Union[float, Sequence[float]],
+        steps: int,
+        guidance_scale: Union[float, Sequence[float]],
+        seeds: Optional[List[Optional[int]]],
+    ) -> List["EditResult"]:
+        """
+        Shared implementation for edit() and edit_batch(). Both call into
+        this method so logic stays in one place.
+
+        Per-item wall time is approximated using elapsed/N; the server also
+        exposes the full batch_time_ms separately.
+        """
+        if self.pipe is None:
+            raise RuntimeError("Pipeline not loaded. Call load() first.")
+        batch_size = len(images)
+        if batch_size > self.max_batch_size:
+            raise ValueError(
+                f"Batch size {batch_size} exceeds pipeline max_batch_size "
+                f"{self.max_batch_size}. Split the batch on the client."
+            )
+
+        def _broadcast(value, name):
+            if isinstance(value, (list, tuple)):
+                if len(value) != batch_size:
+                    raise ValueError(
+                        f"{name} length {len(value)} does not match "
+                        f"batch size {batch_size}"
+                    )
+                return list(value)
+            return [value] * batch_size
+
+        neg_list = (
+            [n if n is not None else None for n in negative_prompts]
+            if negative_prompts is not None
+            else [None] * batch_size
+        )
+        true_cfg_list = _broadcast(true_cfg_scale, "true_cfg_scale")
+        guidance_list = _broadcast(guidance_scale, "guidance_scale")
+
+        if seeds is None:
+            seed_list = [random.randint(0, 2**32 - 1) for _ in range(batch_size)]
+        else:
+            seed_list = [
+                int(s) if s is not None else random.randint(0, 2**32 - 1)
+                for s in seeds
+            ]
+
+        # diffusers wants one generator per item in the batch so seeds stay
+        # independent. The Generator must live on the same device as the
+        # pipeline inputs.
+        generators = [
+            torch.Generator(device=self.device).manual_seed(s) for s in seed_list
+        ]
+
+        # Optional garbage collection between requests.
+        # Off by default: a 12k-tile job spends ~30 minutes in gc.collect()
+        # for no benefit when VRAM has 80 GB headroom. Enable explicitly via
+        # ENABLE_AGGRESSIVE_GC_OPT=1 if you see VRAM creep.
+        if os.environ.get("ENABLE_AGGRESSIVE_GC_OPT", "0") == "1":
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        prompts_list = list(prompts)
+        images_list = list(images)
+
+        print(
+            f"Editing: n={batch_size} steps={steps} "
+            f"cfg={guidance_scale} tcfg={true_cfg_scale} "
+            f"seeds={seed_list}"
+        )
+
         t0 = time.perf_counter()
         try:
             with torch.inference_mode():
                 output = self.pipe(
-                    prompt=prompt,
-                    negative_prompt=negative_prompt,
-                    true_cfg_scale=true_cfg_scale,
-                    image=image,
+                    prompt=prompts_list,
+                    negative_prompt=neg_list,
+                    true_cfg_scale=true_cfg_list,
+                    image=images_list,
                     num_inference_steps=steps,
-                    guidance_scale=guidance_scale,
-                    generator=generator,
+                    guidance_scale=guidance_list,
+                    generator=generators,
                 )
         except TypeError as e:
             # Some diffusers versions name the true_cfg arg differently.
             # Fall back to calling without it so we don't crash the server.
-            print(f"true_cfg_scale kwarg failed ({e}); retrying without it")
+            print(
+                f"true_cfg_scale kwarg failed ({e}); retrying without it"
+            )
             with torch.inference_mode():
                 output = self.pipe(
-                    prompt=prompt,
-                    image=image,
+                    prompt=prompts_list,
+                    negative_prompt=neg_list,
+                    image=images_list,
                     num_inference_steps=steps,
-                    guidance_scale=guidance_scale,
-                    generator=generator,
+                    guidance_scale=guidance_list,
+                    generator=generators,
                 )
 
         elapsed = time.perf_counter() - t0
-        print(f"edit() took {elapsed:.1f}s")
+        per_item = elapsed / max(batch_size, 1)
+        print(
+            f"edit took {elapsed:.1f}s ({per_item:.1f}s/item, batch={batch_size})"
+        )
 
-        return output.images[0]
+        # Pipeline returns PIL list; same length as input batch.
+        if len(output.images) != batch_size:
+            raise RuntimeError(
+                f"Pipeline returned {len(output.images)} images for a batch "
+                f"of {batch_size}"
+            )
+        # Per-item wall time is approximated as elapsed/N because the
+        # pipeline processes all items simultaneously. The server includes
+        # the real batch_time_ms in BatchEditResponse for accurate SLO.
+        return [
+            EditResult(
+                image=img,
+                seed_used=seed_used,
+                time_ms=int(elapsed * 1000 / max(batch_size, 1)),
+            )
+            for img, seed_used in zip(output.images, seed_list)
+        ]
+
+
+@dataclass
+class EditResult:
+    """Result of one edit() call (or one item in edit_batch())."""
+
+    image: Image.Image
+    seed_used: int
+    time_ms: int
 
     @property
     def is_loaded(self) -> bool:

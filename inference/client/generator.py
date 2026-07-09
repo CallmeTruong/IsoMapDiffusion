@@ -1,11 +1,27 @@
 """Generation client for calling inference server."""
 
 import base64
+from dataclasses import dataclass
 from io import BytesIO
-from typing import Optional
+from typing import List, Optional, Sequence
 
 import httpx
 from PIL import Image
+
+
+@dataclass
+class EditResult:
+    """Result returned from edit() and edit_batch().
+
+    Holds both the generated image AND the metadata needed to reproduce
+    or audit the call. seed_used is the seed actually used by the model
+    (random if request did not specify), time_ms is the per-item wall
+    time the server measured (or elapsed/N for batched calls).
+    """
+
+    image: Image.Image
+    seed_used: int
+    time_ms: int
 
 
 class GenerationClient:
@@ -16,10 +32,15 @@ class GenerationClient:
         client = GenerationClient("http://gpu-server:8000")
         result = await client.edit(template_image, prompt)
 
+        # Batched (preferred on A100-80GB):
+        results = await client.edit_batch([img1, img2], [p1, p2])
+
     Features:
         - Connection pooling for improved throughput
         - Keep-alive connections to avoid TCP handshake overhead
         - Configurable concurrency limits
+        - Automatic fallback from /edit/batch to /edit when the server
+          does not support batching (older deployments)
     """
 
     def __init__(
@@ -47,6 +68,8 @@ class GenerationClient:
         self.default_steps = default_steps
         self.default_guidance = default_guidance
         self._client: Optional[httpx.AsyncClient] = None
+        # Cached server /edit/batch capability; None = not yet queried.
+        self._max_batch_size: Optional[int] = None
         self._limits = httpx.Limits(
             max_keepalive_connections=max_keepalive,
             max_connections=max_connections,
@@ -70,21 +93,14 @@ class GenerationClient:
         guidance_scale: Optional[float] = None,
         true_cfg_scale: float = 2.0,
         seed: Optional[int] = None,
-    ) -> Image.Image:
+    ) -> "EditResult":
         """
         Call the /edit endpoint to generate/edit an image.
 
-        Args:
-            image: Input PIL Image (template)
-            prompt: Edit instruction
-            negative_prompt: What to avoid
-            steps: Inference steps (default: self.default_steps)
-            guidance_scale: Guidance scale (default: self.default_guidance)
-            true_cfg_scale: True CFG scale
-            seed: Random seed
-
         Returns:
-            Generated PIL Image
+            EditResult(image, seed_used, time_ms). The seed in the result
+            is the actual server-side seed (which may be random if the
+            request did not specify one), enabling deterministic replay.
         """
         steps = steps or self.default_steps
         guidance_scale = guidance_scale or self.default_guidance
@@ -118,7 +134,164 @@ class GenerationClient:
         # Decode result
         result_b64 = result["image_b64"]
         result_data = base64.b64decode(result_b64)
-        return Image.open(BytesIO(result_data))
+        img = Image.open(BytesIO(result_data))
+        # Touch .load() to fully decode before BytesIO goes out of scope.
+        img.load()
+        return EditResult(
+            image=img,
+            seed_used=int(result["seed_used"]),
+            time_ms=int(result["time_ms"]),
+        )
+
+    async def edit_batch(
+        self,
+        images: Sequence[Image.Image],
+        prompts: Sequence[str],
+        negative_prompts: Optional[Sequence[Optional[str]]] = None,
+        steps: Optional[int] = None,
+        guidance_scale: Optional[float] = None,
+        true_cfg_scale: float = 2.0,
+        seeds: Optional[Sequence[Optional[int]]] = None,
+        prefer_batch: bool = True,
+    ) -> List["EditResult"]:
+        """
+        Batched variant of edit(). Sends N tiles in a single HTTP request
+        so the server can pack them into one pipeline call.
+
+        Args:
+            images: Input PIL images (template per tile).
+            prompts: Edit prompt per tile.
+            negative_prompts: Optional per-tile negative prompt.
+            steps: Inference steps (default: self.default_steps).
+            guidance_scale: Default guidance; broadcast to all items.
+            true_cfg_scale: Default true CFG; broadcast to all items.
+            seeds: Per-tile seed. None means "let server pick randomly".
+            prefer_batch: If True, falls back to sequential /edit calls
+                when the server reports batch=1 (older build). If False,
+                will raise if /edit/batch is not supported.
+
+        Returns:
+            List of EditResult, same order as input.
+        """
+        if len(images) != len(prompts):
+            raise ValueError(
+                f"images and prompts length mismatch: "
+                f"{len(images)} vs {len(prompts)}"
+            )
+        if len(images) == 0:
+            return []
+
+        steps = steps or self.default_steps
+        guidance_scale = guidance_scale or self.default_guidance
+
+        # Decide whether to call /edit/batch. We check max_batch_size via
+        # /health; if the server reports 1, we either fall back or raise.
+        max_batch = await self._get_max_batch_size()
+        if max_batch < 2 or not prefer_batch:
+            if not prefer_batch:
+                raise RuntimeError(
+                    "Server does not support batching (max_batch_size<2)"
+                )
+            # Fall back: send items one at a time.
+            return await self._edit_batch_via_single(
+                images, prompts, negative_prompts, steps,
+                guidance_scale, true_cfg_scale, seeds,
+            )
+
+        # Encode all images and build the per-item payload.
+        items: list[dict] = []
+        for i, (img, prompt) in enumerate(zip(images, prompts)):
+            buffer = BytesIO()
+            img.save(buffer, format="PNG")
+            item: dict = {
+                "image_b64": base64.b64encode(buffer.getvalue()).decode(),
+                "prompt": prompt,
+            }
+            if negative_prompts is not None and i < len(negative_prompts):
+                neg = negative_prompts[i]
+                if neg is not None:
+                    item["negative_prompt"] = neg
+            if seeds is not None and i < len(seeds) and seeds[i] is not None:
+                item["seed"] = int(seeds[i])  # type: ignore[index]
+            items.append(item)
+
+        payload = {
+            "items": items,
+            "steps": steps,
+            "guidance_scale": guidance_scale,
+            "true_cfg_scale": true_cfg_scale,
+        }
+
+        client = await self._get_client()
+        try:
+            response = await client.post(
+                f"{self.base_url}/edit/batch", json=payload
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            # Server doesn't support batching -> graceful degradation.
+            if e.response.status_code in (404, 405) and prefer_batch:
+                self._max_batch_size = 1
+                return await self._edit_batch_via_single(
+                    images, prompts, negative_prompts, steps,
+                    guidance_scale, true_cfg_scale, seeds,
+                )
+            raise
+
+        result = response.json()
+        decoded: list[EditResult] = []
+        for it in result["items"]:
+            data = base64.b64decode(it["image_b64"])
+            img = Image.open(BytesIO(data))
+            img.load()  # fully decode before BytesIO is GC'd
+            decoded.append(
+                EditResult(
+                    image=img,
+                    seed_used=int(it["seed_used"]),
+                    time_ms=int(it["time_ms"]),
+                )
+            )
+        return decoded
+
+    async def _edit_batch_via_single(
+        self,
+        images: Sequence[Image.Image],
+        prompts: Sequence[str],
+        negative_prompts: Optional[Sequence[Optional[str]]],
+        steps: int,
+        guidance_scale: float,
+        true_cfg_scale: float,
+        seeds: Optional[Sequence[Optional[int]]],
+    ) -> List["EditResult"]:
+        """Fallback: send a batch as N sequential /edit calls."""
+        results: list[EditResult] = []
+        for i, (img, prompt) in enumerate(zip(images, prompts)):
+            neg = (
+                negative_prompts[i] if negative_prompts is not None
+                and i < len(negative_prompts) else None
+            )
+            seed = (
+                seeds[i] if seeds is not None and i < len(seeds) else None
+            )
+            res = await self.edit(
+                image=img, prompt=prompt, negative_prompt=neg,
+                steps=steps, guidance_scale=guidance_scale,
+                true_cfg_scale=true_cfg_scale, seed=seed,
+            )
+            results.append(res)
+        return results
+
+    async def _get_max_batch_size(self) -> int:
+        """Cached lookup of server's /edit/batch capability."""
+        if self._max_batch_size is not None:
+            return self._max_batch_size
+        try:
+            health = await self.health_check()
+            self._max_batch_size = int(health.get("max_batch_size", 1))
+        except Exception:
+            # Conservative default: assume no batching.
+            self._max_batch_size = 1
+        return self._max_batch_size
 
     async def health_check(self) -> dict:
         """Check server health status."""
@@ -194,6 +367,7 @@ class SyncGenerationClient:
         self.default_steps = default_steps
         self.default_guidance = default_guidance
         self._client: Optional[httpx.Client] = None
+        self._max_batch_size: Optional[int] = None
         self._limits = httpx.Limits(
             max_keepalive_connections=max_keepalive,
             max_connections=max_connections,
@@ -217,7 +391,7 @@ class SyncGenerationClient:
         guidance_scale: Optional[float] = None,
         true_cfg_scale: float = 2.0,
         seed: Optional[int] = None,
-    ) -> Image.Image:
+    ) -> "EditResult":
         """Synchronous version of edit() with pooled connections."""
         steps = steps or self.default_steps
         guidance_scale = guidance_scale or self.default_guidance
@@ -251,7 +425,137 @@ class SyncGenerationClient:
         # Decode result
         result_b64 = result["image_b64"]
         result_data = base64.b64decode(result_b64)
-        return Image.open(BytesIO(result_data))
+        img = Image.open(BytesIO(result_data))
+        img.load()
+        return EditResult(
+            image=img,
+            seed_used=int(result["seed_used"]),
+            time_ms=int(result["time_ms"]),
+        )
+
+    def edit_batch(
+        self,
+        images: Sequence[Image.Image],
+        prompts: Sequence[str],
+        negative_prompts: Optional[Sequence[Optional[str]]] = None,
+        steps: Optional[int] = None,
+        guidance_scale: Optional[float] = None,
+        true_cfg_scale: float = 2.0,
+        seeds: Optional[Sequence[Optional[int]]] = None,
+        prefer_batch: bool = True,
+    ) -> List["EditResult"]:
+        """Synchronous batched variant. Same semantics as async version."""
+        if len(images) != len(prompts):
+            raise ValueError(
+                f"images and prompts length mismatch: "
+                f"{len(images)} vs {len(prompts)}"
+            )
+        if len(images) == 0:
+            return []
+
+        steps = steps or self.default_steps
+        guidance_scale = guidance_scale or self.default_guidance
+
+        max_batch = self._get_max_batch_size()
+        if max_batch < 2 or not prefer_batch:
+            if not prefer_batch:
+                raise RuntimeError(
+                    "Server does not support batching (max_batch_size<2)"
+                )
+            return self._edit_batch_via_single(
+                images, prompts, negative_prompts, steps,
+                guidance_scale, true_cfg_scale, seeds,
+            )
+
+        items: list[dict] = []
+        for i, (img, prompt) in enumerate(zip(images, prompts)):
+            buffer = BytesIO()
+            img.save(buffer, format="PNG")
+            item: dict = {
+                "image_b64": base64.b64encode(buffer.getvalue()).decode(),
+                "prompt": prompt,
+            }
+            if negative_prompts is not None and i < len(negative_prompts):
+                neg = negative_prompts[i]
+                if neg is not None:
+                    item["negative_prompt"] = neg
+            if seeds is not None and i < len(seeds) and seeds[i] is not None:
+                item["seed"] = int(seeds[i])  # type: ignore[index]
+            items.append(item)
+
+        payload = {
+            "items": items,
+            "steps": steps,
+            "guidance_scale": guidance_scale,
+            "true_cfg_scale": true_cfg_scale,
+        }
+
+        client = self._get_client()
+        try:
+            response = client.post(
+                f"{self.base_url}/edit/batch", json=payload
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (404, 405) and prefer_batch:
+                self._max_batch_size = 1
+                return self._edit_batch_via_single(
+                    images, prompts, negative_prompts, steps,
+                    guidance_scale, true_cfg_scale, seeds,
+                )
+            raise
+
+        result = response.json()
+        decoded: list[EditResult] = []
+        for it in result["items"]:
+            data = base64.b64decode(it["image_b64"])
+            img = Image.open(BytesIO(data))
+            img.load()
+            decoded.append(
+                EditResult(
+                    image=img,
+                    seed_used=int(it["seed_used"]),
+                    time_ms=int(it["time_ms"]),
+                )
+            )
+        return decoded
+
+    def _edit_batch_via_single(
+        self,
+        images: Sequence[Image.Image],
+        prompts: Sequence[str],
+        negative_prompts: Optional[Sequence[Optional[str]]],
+        steps: int,
+        guidance_scale: float,
+        true_cfg_scale: float,
+        seeds: Optional[Sequence[Optional[int]]],
+    ) -> List["EditResult"]:
+        results: list[EditResult] = []
+        for i, (img, prompt) in enumerate(zip(images, prompts)):
+            neg = (
+                negative_prompts[i] if negative_prompts is not None
+                and i < len(negative_prompts) else None
+            )
+            seed = (
+                seeds[i] if seeds is not None and i < len(seeds) else None
+            )
+            res = self.edit(
+                image=img, prompt=prompt, negative_prompt=neg,
+                steps=steps, guidance_scale=guidance_scale,
+                true_cfg_scale=true_cfg_scale, seed=seed,
+            )
+            results.append(res)
+        return results
+
+    def _get_max_batch_size(self) -> int:
+        if self._max_batch_size is not None:
+            return self._max_batch_size
+        try:
+            health = self.health_check()
+            self._max_batch_size = int(health.get("max_batch_size", 1))
+        except Exception:
+            self._max_batch_size = 1
+        return self._max_batch_size
 
     def health_check(self) -> dict:
         """Check server health."""

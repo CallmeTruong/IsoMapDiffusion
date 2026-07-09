@@ -146,34 +146,48 @@ class TileTraversal:
         Tra ve GenerationStep tiep theo (1, 2, hoac 4 quadrants).
 
         Returns None neu da gen xong het quadrant trong bounds.
+        Uses an iterative loop instead of recursion so a degenerate plan
+        can't blow the Python stack.
         """
-        # Rebuild plan neu state da thay doi (e.g. sau khi mark_done)
-        # De don gian va deterministic, ta rebuild khi step index het.
-        # Tuy nhien, de toi uu, ta cap nhat in-memory generated set ngay
-        # trong mark_done() va rebuild o day neu can.
-        if self._current_plan is None or self._step_index >= len(self._current_plan.steps):
-            # Thu rebuild (neu state da thay doi)
-            new_plan = self._build_plan()
-            if not new_plan.steps:
+        seen_steps: set = set()
+        while True:
+            if self._current_plan is None or self._step_index >= len(self._current_plan.steps):
+                new_plan = self._build_plan()
+                if not new_plan.steps:
+                    return None
+                self._current_plan = new_plan
+                self._step_index = 0
+
+            if self._step_index >= len(self._current_plan.steps):
                 return None
-            # Neu plan moi khac plan cu (do state), reset index
-            self._current_plan = new_plan
-            self._step_index = 0
 
-        if self._step_index >= len(self._current_plan.steps):
-            return None
+            step = self._current_plan.steps[self._step_index]
+            self._step_index += 1
 
-        step = self._current_plan.steps[self._step_index]
-        self._step_index += 1
+            # Skip steps whose quadrants are all already generated.
+            generated_set = self.quadrant_state.all_generated()
+            if all(q in generated_set for q in step.quadrants):
+                # Treat as done for plan advancement.
+                self.quadrant_state.mark_generated(
+                    [(q.x, q.y) for q in step.quadrants]
+                )
+                continue
 
-        # Double-check: cac quadrants trong step phai chua generated
-        generated_set = self.quadrant_state.all_generated()
-        for q in step.quadrants:
-            if q in generated_set:
-                # Quadrant da gen -> skip step nay, lay step tiep theo
-                return self.get_next_step()
+            # Detect a degenerate infinite loop (plan keeps emitting the
+            # same step because of a state bug). Should never happen, but
+            # we guard anyway so the pipeline doesn't hang.
+            step_key = (
+                step.step_type,
+                tuple(sorted((q.x, q.y) for q in step.quadrants)),
+            )
+            if step_key in seen_steps:
+                log_msg = f"Traversal: cycle detected on step {step_key}"
+                import logging
+                logging.getLogger(__name__).warning(log_msg)
+                return None
+            seen_steps.add(step_key)
 
-        return step
+            return step
 
     def mark_done(self, quadrants: Iterable[tuple[int, int]]) -> None:
         """Danh dau N quadrants vua gen xong (step 2x2/2x1/1x2/1x1)."""

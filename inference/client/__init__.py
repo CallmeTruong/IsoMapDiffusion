@@ -1,6 +1,15 @@
 """Inference client package."""
 
-from .generator import GenerationClient, SyncGenerationClient
+from .generator import EditResult, GenerationClient, SyncGenerationClient
+from .resume import (
+    BatchRecord,
+    ResumeManifest,
+    STATUS_DONE,
+    STATUS_FAILED,
+    STATUS_INFLIGHT,
+    STATUS_PENDING,
+)
+from .spot_retry import with_spot_retry
 from .template import (
     TemplateBuilder,
     InfillRegion,
@@ -33,8 +42,17 @@ OmniTemplateBuilder = TemplateBuilder
 
 __all__ = [
     # Generator
+    "EditResult",
     "GenerationClient",
     "SyncGenerationClient",
+    # Spot resume
+    "BatchRecord",
+    "ResumeManifest",
+    "STATUS_DONE",
+    "STATUS_FAILED",
+    "STATUS_INFLIGHT",
+    "STATUS_PENDING",
+    "with_spot_retry",
     # Template
     "TemplateBuilder",
     "OmniTemplateBuilder",  # legacy alias
