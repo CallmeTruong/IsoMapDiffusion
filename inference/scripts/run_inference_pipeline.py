@@ -71,6 +71,7 @@ TILE_RE = re.compile(r"^tile_([+-]\d+)_([+-]\d+)_[a-f0-9]+\.png$")
 _cfg = get_inference_config()
 TILE_SIZE: int = _cfg.tile_size_px          # 1024
 QUADRANT_SIZE: int = _cfg.quadrant_size_px  # 512
+TEMPLATE_SIZE: int = _cfg.tile_size_px      # alias for clarity
 
 STATE_VERSION = 1  # bump khi format thay doi
 
@@ -322,7 +323,8 @@ def build_step_template(
         get_render=get_render,
         get_generation=get_generation,
     )
-    result = builder.build(border_width=2, allow_expansion=allow_expansion)
+    border_width = _cfg.border_width
+    result = builder.build(border_width=border_width, allow_expansion=allow_expansion)
     if result is None:
         return None, None, builder._last_validation_error or "no valid placement"
 
@@ -337,22 +339,33 @@ def build_step_template(
 
 def verify_output_size(output_img: Image.Image, placement) -> None:
     """
-    Verify that model output dimensions match placement.infill_width/height.
+    Verify model output is either:
+    - Full template 1024x1024 (model returns the entire template after editing)
+    - Or the exact infill region (placement.infill_width x placement.infill_height)
 
-    Model output CHI chua infill region pixels (khong phai full template).
-    Model edit pixel trong vung red-border, giu nguyen context pixels.
-
-    Raises a clear error if dimensions do not match.
+    Qwen-Image-Edit is a diffusion model; its output is always the same size as
+    its input. The standard input is the full 1024x1024 template, so the
+    standard output is also 1024x1024 (containing both edited infill AND the
+    regenerated context). When the output is 1024x1024 we will crop the infill
+    region using placement.infill_x/y. When it is exactly the infill size, we
+    treat (0,0) as the top-left of the infill.
     """
     expected_w = placement.infill_width
     expected_h = placement.infill_height
     actual_w, actual_h = output_img.size
-    if (actual_w, actual_h) != (expected_w, expected_h):
-        raise ValueError(
-            f"Model output size mismatch: expected ({expected_w}, {expected_h}) "
-            f"per placement.infill_width/height, got ({actual_w}, {actual_h}). "
-            f"Model output should contain ONLY the infill region (not the full template)."
-        )
+
+    # Accept either full template (1024x1024) or exact infill region.
+    if (actual_w, actual_h) == (TEMPLATE_SIZE, TEMPLATE_SIZE):
+        return
+    if (actual_w, actual_h) == (expected_w, expected_h):
+        return
+
+    raise ValueError(
+        f"Model output size mismatch: expected either "
+        f"({TEMPLATE_SIZE}, {TEMPLATE_SIZE}) (full template) or "
+        f"({expected_w}, {expected_h}) (infill only), "
+        f"got ({actual_w}, {actual_h})."
+    )
 
 
 def crop_quadrants_from_output(
@@ -363,11 +376,16 @@ def crop_quadrants_from_output(
     """
     Crop quadrants tu model output.
 
-    CRITICAL: Model output CHI chua infill region pixels (khong phai full template).
-    Model edit pixel trong vung red-border, giu nguyen context pixels.
+    Model output is normally the FULL 1024x1024 template (Qwen-Image-Edit is a
+    diffusion model whose output matches its input). The infill region inside
+    the template starts at (placement.infill_x, placement.infill_y). For a
+    1x2 placement the infill is 512x1024 placed at the left or right edge of
+    the template; for a 1x1 placement it is 512x512 at one of the four corners;
+    for a 2x2 placement the infill is the whole 1024x1024 template.
 
-    Vi vy crop coordinates phai tinh tu (0,0) trong output,
-    KHONG phai tu placement.infill_x/y.
+    If the model happened to return only the infill region (no context), the
+    function also handles that case by treating (0,0) as the top-left of the
+    infill.
     """
     verify_output_size(output_img, placement)
 
@@ -388,13 +406,23 @@ def crop_quadrants_from_output(
     quad_w = QUADRANT_SIZE  # Luon 512
     quad_h = QUADRANT_SIZE
 
+    # Output is full template (1024x1024) if it does not match the infill size.
+    output_is_full_template = output_img.size == (TEMPLATE_SIZE, TEMPLATE_SIZE)
+
     for q in sorted_quads:
         local_x = q.x - min_qx  # 0 hoac 1
         local_y = q.y - min_qy  # 0 hoac 1
 
-        # Vi tri crop trong output image (tu (0,0), khong phai placement.infill_x/y)
-        x0 = local_x * quad_w
-        y0 = local_y * quad_h
+        if output_is_full_template:
+            # Coordinates in the full 1024x1024 output. The infill region starts
+            # at (placement.infill_x, placement.infill_y) and has size
+            # (placement.infill_width, placement.infill_height).
+            x0 = placement.infill_x + local_x * quad_w
+            y0 = placement.infill_y + local_y * quad_h
+        else:
+            # Output is the exact infill region; top-left of the infill is (0, 0).
+            x0 = local_x * quad_w
+            y0 = local_y * quad_h
 
         crop = output_img.crop((
             x0, y0,

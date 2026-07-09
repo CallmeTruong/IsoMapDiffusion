@@ -56,19 +56,15 @@ class QwenEditPipeline:
                 "Please set LORA_PATH in .env to a valid LoRA weights directory."
             )
 
-        # Use model CPU offload for faster inference than sequential offload
-        # This keeps entire model on CPU and only moves to GPU when needed
+        # A40 has 44.4 GiB usable - tight for full Qwen-Image-Edit + LoRA.
+        # Use sequential CPU offload (layer-by-layer) which is stable across requests
+        # unlike enable_model_cpu_offload which can crash on cleanup.
         try:
-            self.pipe.enable_model_cpu_offload()
-            print("Model CPU offload enabled")
-        except AttributeError:
-            # Fallback for older diffusers versions
-            try:
-                self.pipe.enable_sequential_cpu_offload()
-                print("Sequential CPU offload enabled (fallback)")
-            except Exception as e:
-                print(f"Could not enable CPU offload: {e}")
-                self.pipe.to(self.device)
+            self.pipe.enable_sequential_cpu_offload()
+            print("Sequential CPU offload enabled")
+        except Exception as e:
+            print(f"Sequential offload failed ({e}); falling back to .to(device)")
+            self.pipe.to(self.device)
         print("Pipeline ready on", self.device)
 
     def edit(

@@ -1,5 +1,6 @@
 """FastAPI inference server for Qwen Image Edit with LoRA."""
 
+import asyncio
 import base64
 import os
 import sys
@@ -117,16 +118,20 @@ async def edit_image(req: EditRequest) -> EditResponse:
         image_data = base64.b64decode(req.image_b64)
         input_image = Image.open(BytesIO(image_data)).convert("RGB")
 
-        # Run inference
+        # Run inference off the event loop so concurrent requests can be
+        # accepted (uvicorn will still process them sequentially through the
+        # single pipeline, but it can interleave base64 encode/decode and
+        # other I/O from the client side).
         start_time = time.time()
-        result = pipeline.edit(
-            image=input_image,
-            prompt=req.prompt,
-            negative_prompt=req.negative_prompt,
-            true_cfg_scale=req.true_cfg_scale,
-            steps=req.steps,
-            guidance_scale=req.guidance_scale,
-            seed=req.seed,
+        result = await asyncio.to_thread(
+            pipeline.edit,
+            input_image,
+            req.prompt,
+            req.negative_prompt,
+            req.true_cfg_scale,
+            req.steps,
+            req.guidance_scale,
+            req.seed,
         )
 
         inference_time_ms = int((time.time() - start_time) * 1000)
