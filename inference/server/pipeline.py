@@ -472,6 +472,31 @@ class QwenEditPipeline:
             for img, seed_used in zip(output.images, seed_list)
         ]
 
+    @property
+    def is_loaded(self) -> bool:
+        """True iff the underlying diffusers pipeline has been loaded."""
+        return getattr(self, "pipe", None) is not None
+
+    def __getattr__(self, name: str):
+        """Retro-compat shim.
+
+        Earlier bytecode serialisations of this class (shipped before the
+        ``is_loaded`` property existed) were still being executed on remote
+        pods, so every ``/edit`` request crashed with:
+
+            AttributeError: 'QwenEditPipeline' object has no attribute 'is_loaded'
+
+        ``__getattr__`` only runs when normal attribute lookup fails, so the
+        property path above is unaffected. If a stale instance somehow has
+        no ``is_loaded`` attribute, this shim synthesises it from ``pipe``
+        instead of crashing the server.
+        """
+        if name == "is_loaded":
+            return getattr(self, "pipe", None) is not None
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r}"
+        )
+
 
 @dataclass
 class EditResult:
@@ -480,29 +505,3 @@ class EditResult:
     image: Image.Image
     seed_used: int
     time_ms: int
-
-    @property
-    def is_loaded(self) -> bool:
-        """Check if pipeline is loaded."""
-        return self.pipe is not None
-
-    def __getattr__(self, name: str):
-        """Retro-compat shim: gracefully handle missing attributes that older
-        serialized bytecode on remote pods may reference.
-
-        The previous version of this class exposed ``is_loaded`` only via the
-        property above. Some deployed pods were still running the old
-        ``QwenImageEditPipeline`` instance under a stale ``__pycache__/`` and
-        crashed with ``AttributeError: 'QwenEditPipeline' object has no
-        attribute 'is_loaded'`` on every /edit request.
-
-        ``__getattr__`` is only called when normal attribute lookup fails, so
-        the property path is unaffected. If anyone somehow serializes an
-        instance without ``is_loaded``, this shim synthesises it from the
-        underlying ``pipe`` attribute instead of crashing the server.
-        """
-        if name == "is_loaded":
-            return getattr(self, "pipe", None) is not None
-        raise AttributeError(
-            f"{type(self).__name__!r} object has no attribute {name!r}"
-        )
