@@ -157,11 +157,11 @@ if __name__ == "__main__":
     p.add_argument("--output", "-o", required=True,
                    help="Path output JSON plan (vd output/model_map_plan.json).")
     p.add_argument("--padding", type=int, default=DEFAULT_PADDING,
-                   help="Canvas padding 2 canh (default: 100).")
+                   help="Canvas padding 2 canh -- default: 100.")
     p.add_argument("--stride", type=int, default=None,
-                   help="Override stride (default: tile_size * camera_move_step tu config).")
+                   help="Override stride -- default: tile_size * camera_move_step tu config.")
     p.add_argument("--tile-size", type=int, default=None,
-                   help="Override tile_size (default: tu src/config.mjs TILE.sizePx).")
+                   help="Override tile_size -- default: tu src/config.mjs TILE.sizePx.")
     args = p.parse_args()
 
     result = export_dzi_plan(

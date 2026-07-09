@@ -11,13 +11,13 @@ def main():
         "--host",
         type=str,
         default="0.0.0.0",
-        help="Host to bind to (default: 0.0.0.0)",
+        help="Host to bind to -- default: 0.0.0.0",
     )
     parser.add_argument(
         "--port",
         type=int,
         default=8000,
-        help="Port to bind to (default: 8000)",
+        help="Port to bind to -- default: 8000",
     )
     parser.add_argument(
         "--reload",
@@ -28,7 +28,7 @@ def main():
         "--workers",
         type=int,
         default=1,
-        help="Number of workers (default: 1, GPU servers typically need 1)",
+        help="Number of workers -- default: 1, GPU servers typically need 1",
     )
 
     args = parser.parse_args()

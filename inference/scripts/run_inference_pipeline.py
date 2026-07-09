@@ -779,34 +779,34 @@ def parse_args() -> argparse.Namespace:
                    help="Path to gen output dir (tile_<qx>_<qy>_<hash>.png).")
     p.add_argument("--endpoint", type=str,
                    default=os.environ.get("INFERENCE_ENDPOINT", "http://localhost:8000"),
-                   help="Inference server URL (default: from INFERENCE_ENDPOINT env var).")
+                   help="Inference server URL -- default: from INFERENCE_ENDPOINT env var.")
     p.add_argument("--prompt", type=str, default=None,
-                   help="Edit prompt (default: from src.constants.DEFAULT_PROMPT).")
+                   help="Edit prompt -- default: from src.constants.DEFAULT_PROMPT.")
     p.add_argument("--concurrency", type=int, default=4,
-                   help="Max in-flight requests (default: 4). Note: plan-based generation is sequential; this is for connection pooling.")
+                   help="Max in-flight requests (default=4). Note: plan-based generation is sequential; this is for connection pooling.")
     p.add_argument("--tile-size", type=int, default=1024,
-                   help="Tile size in pixels (default: 1024).")
+                   help="Tile size in pixels (default=1024).")
     p.add_argument("--timeout", type=int, default=300,
-                   help="HTTP timeout per request in seconds (default: 300).")
+                   help="HTTP timeout per request in seconds (default=300).")
     p.add_argument("--server-wait", type=float, default=300.0,
                    help="Max seconds to wait for server model_loaded=true.")
     p.add_argument("--resume", action="store_true",
                    help="Resume from .state.json + on-disk tiles.")
     p.add_argument("--state-file", type=str, default=".state.json",
-                   help="State filename inside --output (default: .state.json).")
+                   help="State filename inside --output (default=.state.json).")
     p.add_argument("--state-save-interval", type=float, default=15.0,
-                   help="Seconds between state flushes (default: 15).")
+                   help="Seconds between state flushes (default=15).")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="Verbose logging.")
     p.add_argument("--template-format", type=str, default="PNG",
                    choices=["PNG", "JPEG"],
                    help="Image format for the template sent to the server "
-                        "(default: PNG, lossless). JPEG shaves 50-70% of "
+                        "-- default: PNG, lossless. JPEG shaves 50-70 percent of "
                         "payload size with no visible quality loss because "
                         "the model only needs the red border + context. "
                         "Both endpoints handle decoding transparently.")
     p.add_argument("--jpeg-quality", type=int, default=92,
-                   help="Quality when --template-format=jpeg (default: 92).")
+                   help="Quality when --template-format=jpeg -- default: 92.")
     return p.parse_args()
 
 

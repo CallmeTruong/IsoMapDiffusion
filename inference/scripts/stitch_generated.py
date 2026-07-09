@@ -134,7 +134,7 @@ def main():
     parser.add_argument("--output", type=str, required=True,
                         help="Output PNG path")
     parser.add_argument("--stride", type=int, default=DEFAULT_STRIDE,
-                        help=f"Pixel stride gi?a 2 tile (default {DEFAULT_STRIDE})")
+                        help=f"Pixel stride gi?a 2 tile -- default: {DEFAULT_STRIDE}")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
