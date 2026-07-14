@@ -9,13 +9,13 @@ import { resolveApiKey, getProvider } from '../tile/provider/index.mjs';
 
 export { parseArgs };
 
-/** Resolve project root from module path */
+
 export function projectRoot(importMetaUrl) {
   const __dirname = path.dirname(fileURLToPath(importMetaUrl));
   return path.resolve(__dirname, '..');
 }
 
-/** Load .env from project root */
+
 export function loadEnv(projectRootDir) {
   const envPath = path.join(projectRootDir, '.env');
   if (!fs.existsSync(envPath)) return;
@@ -36,7 +36,7 @@ export function resolveNumWorkers(workersArg) {
   return Math.max(1, Math.min(desired, Math.min(WORKERS.max, cpu)));
 }
 
-/** Build renderCfg object from ARGS + TILE defaults */
+
 export function buildRenderCfg(args = {}) {
   return {
     sizePx:         TILE.sizePx,
@@ -57,7 +57,7 @@ export function buildRenderCfg(args = {}) {
   };
 }
 
-/** Validate batch render options (CLI args) */
+
 export function validateBatchOpts(opts, projectRootDir) {
   const errors = [];
   if (!opts.manifest) errors.push('--manifest is required');
@@ -73,12 +73,7 @@ export function validateBatchOpts(opts, projectRootDir) {
   return errors;
 }
 
-/**
- * Resolve provider + api key from CLI args / env.
- *
- * @param {Object} [opts] - { provider, 'api-key' }
- * @returns {{ providerId: string, apiKey: string, provider: object }}
- */
+
 export function resolveCredentials(opts = {}) {
   const providerId = opts.provider ?? PROVIDERS.default;
   const provider = getProvider(providerId);

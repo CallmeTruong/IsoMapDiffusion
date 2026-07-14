@@ -41,14 +41,10 @@ export function saveCheckpoint(checkpointPath, doneTiles) {
 }
 
 export class CheckpointTracker {
-  /**
-   * @param {string} checkpointPath
-   * @param {number} [flushIntervalMs] - Flush interval (ms, default từ CHECKPOINT.flushIntervalMs)
-   */
   constructor(checkpointPath, flushIntervalMs = FLUSH_INTERVAL) {
     this.path = checkpointPath;
     this.flushIntervalMs = flushIntervalMs;
-    this.doneTiles = new Map(); // key = "qx,qy" → {qx, qy}
+    this.doneTiles = new Map();
     this.dirty = false;
     this.timer = null;
 
@@ -61,7 +57,7 @@ export class CheckpointTracker {
     }
   }
 
-  /** Mark a tile as done. */
+
   markDone(qx, qy) {
     const key = `${qx},${qy}`;
     if (!this.doneTiles.has(key)) {
@@ -79,14 +75,14 @@ export class CheckpointTracker {
     }, this.flushIntervalMs);
   }
 
-  /** Force flush to disk. */
+
   flush() {
     if (!this.dirty) return;
     saveCheckpoint(this.path, Array.from(this.doneTiles.values()));
     this.dirty = false;
   }
 
-  /** Cleanup. */
+
   close() {
     if (this.timer) {
       clearTimeout(this.timer);
@@ -95,7 +91,7 @@ export class CheckpointTracker {
     this.flush();
   }
 
-  /** Number of done tiles. */
+
   get size() {
     return this.doneTiles.size;
   }

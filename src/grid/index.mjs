@@ -5,18 +5,14 @@ import { buildSpatialIndex } from '../utils/geo.mjs';
 import { hasLand } from '../utils/sampling.mjs';
 import { GRID } from '../config.mjs';
 
-/**
- * Generate cell ID from grid coordinates
- */
+// Generate cell ID from grid coordinates
 export function cellIdFromGrid(col, row, centroid) {
   const clng = Math.round(centroid[0] * 100000) / 100000;
   const clat = Math.round(centroid[1] * 100000) / 100000;
   return `cell_${col}_${row}_${clng}_${clat}`;
 }
 
-/**
- * Load district boundaries from directory
- */
+// Load district boundaries from directory
 export function loadDistricts(dir) {
   if (!fs.existsSync(dir)) {
     throw new Error('dir not found: ' + dir);
@@ -27,7 +23,7 @@ export function loadDistricts(dir) {
     .sort();
 
   if (files.length === 0) {
-    throw new Error('cant find any .geojson in ' + dir);
+    throw new Error('No .geojson files in ' + dir);
   }
 
   const features = [];
@@ -45,38 +41,34 @@ export function loadDistricts(dir) {
     );
 
     if (polygons.length === 0) {
-      console.warn('Skip ( no Polygon ): ' + file);
+      console.warn('Skip (no Polygon): ' + file);
       continue;
     }
 
     features.push(...polygons);
-    console.log('  Loaded: ' + file + ' (' + polygons.length + ' polygon)');
+    console.log('  Loaded: ' + file + ' (' + polygons.length + ' polygons)');
   }
 
   if (features.length === 0) {
-    throw new Error('No Polygon');
+    throw new Error('No polygons found');
   }
 
   return features;
 }
 
-/**
- * Merge all districts into 1 polygon for fast bounds check
- */
+// Merge all districts into a single polygon for fast bounds check
 export function buildUnion(features) {
   const rewound = features.map(f => turf.rewind(f, { reverse: true, mutate: false }));
   let union = rewound[0];
   for (let i = 1; i < rewound.length; i++) {
     try {
       union = turf.union(turf.featureCollection([union, rewound[i]])) ?? union;
-    } catch { /* bo qua geometry loi */ }
+    } catch { /* skip invalid geometry */ }
   }
   return union;
 }
 
-/**
- * Load polygon file with filtering by area
- */
+// Load polygon file with filtering by area
 export function loadPolygonFile(filePath, minArea = 0) {
   if (!fs.existsSync(filePath)) return [];
   const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -89,18 +81,14 @@ export function loadPolygonFile(filePath, minArea = 0) {
     );
 }
 
-/**
- * Load any geometry file
-*/
+// Load any geometry file
 export function loadAnyGeomFile(filePath) {
   if (!fs.existsSync(filePath)) return [];
   const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
   return raw.features.filter(f => f.geometry);
 }
 
-/**
- * Classify a cell using spatial index
- */
+// Classify a cell using spatial index
 export function classifyCell(cell, cellBBox, cityBBox, citySearch, cityFeatures,
                            infraSearch, infraFeatures, waterSearch, waterFeatures, minWaterM2) {
   // Fast path 1: outside city bbox
@@ -144,9 +132,7 @@ export function classifyCell(cell, cellBBox, cityBBox, citySearch, cityFeatures,
   return hasLand(cell, waterSearch, waterFeatures, minWaterM2) ? 'LAND' : 'SKIP';
 }
 
-/**
- * Main grid generation function
- */
+// Main grid generation function
 export async function generateGrid(options = {}) {
   const {
     districtsDir = './districts',
@@ -157,39 +143,33 @@ export async function generateGrid(options = {}) {
     outputDir = './output',
   } = options;
 
-  console.log('\n=== HCMC Grid Generator (Optimized) ===\n');
+  console.log('\n=== Grid Generator ===\n');
 
-  // 1. Load districts
-  console.log('1. Load districts...');
+  console.log('Loading districts...');
   const districtFeatures = loadDistricts(districtsDir);
   const districtUnion = buildUnion(districtFeatures);
   const cityBBox = turf.bbox(districtUnion);
   console.log('   BBox: [' + cityBBox.map(v => v.toFixed(4)).join(', ') + ']\n');
 
-  // 2. Load water
-  console.log('2. Load water (' + waterFile + ')...');
+  console.log('Loading water (' + waterFile + ')...');
   const waterFeaturesRaw = loadPolygonFile(waterFile, minWaterM2);
-  console.log('   ' + waterFeaturesRaw.length + ' vung nuoc\n');
+  console.log('  ' + waterFeaturesRaw.length + ' water bodies\n');
 
-  // 3. Load infra
-  console.log('3. Load infra (' + infraFile + ')...');
+  console.log('Loading infra (' + infraFile + ')...');
   const infraFeaturesRaw = loadAnyGeomFile(infraFile);
-  console.log('   ' + infraFeaturesRaw.length + ' cong trinh\n');
+  console.log('  ' + infraFeaturesRaw.length + ' infra features\n');
 
-  // 4. Build spatial indexes
-  console.log('4. Build spatial indexes (rbush)...');
+  console.log('Building spatial indexes...');
   const { search: citySearch }  = buildSpatialIndex(districtFeatures);
   const { search: infraSearch } = buildSpatialIndex(infraFeaturesRaw);
   const { search: waterSearch } = buildSpatialIndex(waterFeaturesRaw);
-  console.log('   Done.\n');
+  console.log('  Done.\n');
 
-  // 5. Generate grid
-  console.log('5. Generate grid ' + cellSizeKm + 'km...');
+  console.log('Generating grid ' + cellSizeKm + 'km...');
   const rawGrid = turf.squareGrid(cityBBox, cellSizeKm, { units: 'kilometers' });
-  console.log('   ' + rawGrid.features.length + ' raw cells\n');
+  console.log('  ' + rawGrid.features.length + ' raw cells\n');
 
-  // 6. Classify cells
-  console.log('6. Classify cells (with spatial index)...');
+  console.log('Classifying cells...');
 
   let land = 0, infra = 0, skip = 0;
   let processed = 0;
@@ -248,7 +228,7 @@ export async function generateGrid(options = {}) {
     })
     .filter(Boolean);
 
-  console.log('\n\n Result:');
+  console.log('\n\nResult:');
   console.log('  LAND  : ' + land);
   console.log('  INFRA : ' + infra);
   console.log('  SKIP  : ' + skip);
@@ -259,7 +239,7 @@ export async function generateGrid(options = {}) {
   const dupSet = new Set();
   const dups = ids.filter(id => dupSet.has(id) ? true : (dupSet.add(id), false)).length;
 
-  if (dups > 0) console.warn('\nWarn: ' + dups + ' cell_id is duplicate!');
+  if (dups > 0) console.warn('\nWarning: ' + dups + ' duplicate cell_id(s)!');
   console.log('  Unique IDs: ' + (features.length - dups));
 
   // Output
@@ -267,8 +247,7 @@ export async function generateGrid(options = {}) {
 
   const geojsonPath = path.join(outputDir, 'final_grid.geojson');
 
-  // Snapshot seed point FIRST (stable across runs unless input changes)
-  // seed = (cityBBox min + max) / 2 → independent of which cells are classified
+  // Seed point from city bbox center
   const seed = {
     seed_lat: cityBBox[1] < cityBBox[3]
       ? (cityBBox[1] + cityBBox[3]) / 2
@@ -281,13 +260,13 @@ export async function generateGrid(options = {}) {
     created_at: new Date().toISOString(),
     config: {
       minWaterM2,
-      heading: undefined, // filled by render pipeline
+      heading: undefined,
       pitch: undefined,
     },
   };
   const seedPath = path.join(outputDir, 'seed.json');
 
-  // Manifest: timestamped (immutable history) + stable (latest) symlink/copy
+
   const ts = seed.created_at.replace(/[:.]/g, '-');
   const manifestPath = path.join(outputDir, `render_manifest_${ts}.json`);
   const stableManifestPath = path.join(outputDir, 'render_manifest.json');
@@ -304,7 +283,7 @@ export async function generateGrid(options = {}) {
     status: f.properties.status,
   }));
 
-  // Write timestamped manifest (full history) + stable manifest (latest for render_tiles to read)
+
   fs.writeFileSync(manifestPath, JSON.stringify(manifest));
   fs.writeFileSync(stableManifestPath, JSON.stringify(manifest));
   fs.writeFileSync(seedPath, JSON.stringify(seed, null, 2));

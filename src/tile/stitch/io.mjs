@@ -1,8 +1,8 @@
 /**
- * tile/stitch/io.mjs — High-level helpers: stitchGrid (one-shot), savePng
+ * tile/stitch/io.mjs — High-level helpers: stitchGrid (one-shot), savePng.
  *
- * stitchGrid: stitch + save trong 1 call. Phù hợp cho scripts muốn ghép nhanh.
- * savePng: wrapper quanh sharp.png().toFile().
+ * stitchGrid: stitch + save in one call. Convenient for scripts that want a quick grid stitch.
+ * savePng: thin wrapper around sharp.png().toFile().
  */
 
 import sharp from 'sharp';
@@ -11,11 +11,11 @@ import { computeLayout } from './layout.mjs';
 import { annotateSeams } from './annotate.mjs';
 
 /**
- * Lưu sharp instance ra file PNG.
+ * Save a sharp instance to a PNG file.
  *
  * @param {sharp.Sharp} img
  * @param {string} filepath
- * @returns {Promise<{size: number}>} Kích thước file (bytes)
+ * @returns {Promise<{size: number}>} File size in bytes
  */
 export async function savePng(img, filepath) {
   const info = await img.png().toFile(filepath);
@@ -23,19 +23,19 @@ export async function savePng(img, filepath) {
 }
 
 /**
- * One-shot helper: stitch + (optional) annotate + save trong 1 call.
+ * One-shot helper: stitch + (optional) annotate + save in one call.
  *
  * @param {Object} opts
  * @param {Array<{r,c,png}>} opts.tiles
- * @param {number} opts.gridSize   - N (cho N×N)
- * @param {number} opts.tileSize   - tile px
- * @param {number} opts.stride     - pixel offset giữa 2 tile
- * @param {string} opts.outPath    - đường dẫn file PNG output
- * @param {boolean} [opts.annotate] - vẽ seam line đỏ
- * @param {boolean} [opts.flipX]   - lật ngang từng tile
+ * @param {number} opts.gridSize   - N (for N×N)
+ * @param {number} opts.tileSize   - tile size in px
+ * @param {number} opts.stride     - pixel offset between two tiles
+ * @param {string} opts.outPath    - output PNG file path
+ * @param {boolean} [opts.annotate] - draw red seam line
+ * @param {boolean} [opts.flipX]   - flip each tile horizontally
  * @param {Object} [opts.background] - RGBA
- * @param {number} [opts.gridCols] - số cột (mặc định = gridSize)
- * @param {number} [opts.gridRows] - số hàng (mặc định = gridSize)
+ * @param {number} [opts.gridCols] - number of columns (default = gridSize)
+ * @param {number} [opts.gridRows] - number of rows (default = gridSize)
  * @returns {Promise<{outPath, size, mapW, mapH}>}
  */
 export async function stitchGrid({
@@ -54,7 +54,7 @@ export async function stitchGrid({
 
   let result = base;
   if (annotate) {
-    // sharp instance chỉ composite 1 lần — toBuffer() trước rồi sharp(buffer) lại
+    // A sharp instance can only composite once — toBuffer() first then re-wrap in sharp(buffer)
     const baseBuf = await base.png().toBuffer();
     const baseCloned = sharp(baseBuf);
     result = await annotateSeams(baseCloned, layout);

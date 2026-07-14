@@ -3,12 +3,12 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { Worker } from 'worker_threads';
+import { spawnSync } from 'child_process';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = __dirname;
 
-import { TILE, TILE_SIZE_M, CELL_SIZE_M, WORKERS, PATHS, GOOGLE, TMP, CHECKPOINT, PROVIDERS, FALLBACK, resolvePath } from './src/config.mjs';
-import { parseArgs } from './src/config.mjs';
+import { TILE, TILE_SIZE_M, CELL_SIZE_M, WORKERS, PATHS, TMP, CHECKPOINT, PROVIDERS, FALLBACK, resolvePath, parseArgs } from './src/config.mjs';
 import {
   loadEnv, resolveNumWorkers, buildRenderCfg, getProvider, resolveApiKey,
   chunkArray, exportRenderOutputs,
@@ -18,8 +18,9 @@ import {
   filterPendingTiles, sortPendingByPriority,
   loadCheckpoint, saveCheckpoint, CheckpointTracker, isTileFullyRendered,
 } from './src/tile/index.mjs';
+import { isPlaceholderPng } from './src/tile/placeholder_detect.mjs';
 
-// ─── Setup ────────────────────────────────────────────────────────────────────
+
 
 loadEnv(PROJECT_ROOT);
 
@@ -34,13 +35,35 @@ const NUM_WORKERS = resolveNumWorkers(ARGS.workers);
 const RENDER_CFG  = buildRenderCfg(ARGS);
 RENDER_CFG.fallback = FALLBACK;
 
+const HEADLESS = (() => {
+  const pick = (v) => {
+    if (v === 'visible' || v === 'no' || v === 'off' || v === '0' || v === 'false') return 'new';
+    if (v === 'new')    return 'new';
+    if (v === 'old')    return 'old';
+    if (v === 'shell' || v === 'true' || v === '1' || v === undefined) return true;
+    return true;
+  };
+  let argVal;
+  if (ARGS['no-headless']) argVal = 'visible';
+  else if (ARGS.headless !== undefined) argVal = String(ARGS.headless);
+  else argVal = process.env.HEADLESS;
+  const final = pick(argVal);
+  console.log(`Browser mode: headless=${JSON.stringify(final)}`);
+  return final;
+})();
+
 const SESSION_MAX_MS   = TILE.sessionMaxMs;
 const PROTOCOL_TIMEOUT = TILE.protocolTimeout;
 const BLANK_SIZE_KB    = Number(ARGS.blanksize ?? TILE.blankSizeKb);
 const MAX_RETRY        = Number(ARGS.retry     ?? TILE.maxRetry);
 const CHECKPOINT_PATH  = path.join(OUTPUT_DIR, PATHS.checkpoint);
 
-// ─── Temp dir ─────────────────────────────────────────────────────────────────
+const CHROME_PATH = process.env.PUPPETEER_EXECUTABLE_PATH
+  || process.env.CHROME_PATH
+  || null;
+if (CHROME_PATH) console.log(`Chrome binary: ${CHROME_PATH}`);
+
+
 
 const TMP_DIR = path.join(os.tmpdir(), TMP.dirName);
 fs.mkdirSync(TMP_DIR, { recursive: true });
@@ -55,7 +78,7 @@ function cleanupTemp() {
   } catch {}
 }
 
-// ─── Validate inputs ──────────────────────────────────────────────────────────
+
 
 if (!API_KEY) {
   console.error(`Need credentials for provider '${PROVIDER_ID}'.`);
@@ -83,7 +106,7 @@ try {
     .forEach(f => { fs.rmSync(f, { recursive: true, force: true }); console.log('clean old file: ' + f); });
 } catch {}
 
-// ─── Load manifest + grid ─────────────────────────────────────────────────────
+
 
 const manifest = JSON.parse(fs.readFileSync(MANIFEST_FILE, 'utf8'));
 const seedInfo = computeSeedPoint(manifest, path.dirname(MANIFEST_FILE));
@@ -104,8 +127,7 @@ for (const status of quadrantStatus.values()) {
 }
 console.log('Quadrant status:', statusCounts);
 
-// ─── Filter pending + checkpoint ──────────────────────────────────────────────
-
+console.log(`\n─── Filter pending + checkpoint ───`);
 const checkpoint = loadCheckpoint(CHECKPOINT_PATH);
 let doneSet = null;
 if (checkpoint && Array.isArray(checkpoint.doneTiles)) {
@@ -139,7 +161,7 @@ if (pending.length > 0) {
   for (const t of pending) counts[t._invalidReason] = (counts[t._invalidReason] || 0) + 1;
   console.log(`Priority: missing=${counts.missing} corrupt=${counts.corrupt} blurry=${counts.blurry}`);
 }
-console.log('FRUSTUM_W:', TILE_SIZE_M, 'CELL:', CELL_SIZE_M);
+console.log('TILE_SIZE_M:', TILE_SIZE_M, 'CELL_SIZE_M:', CELL_SIZE_M);
 
 console.log('\n─── Render Config ───');
 console.log('Tiles to render:', pending.length, '/', tiles.length);
@@ -148,14 +170,16 @@ console.log(`Provider: ${PROVIDER.displayName} (${validKeys.length} key(s) valid
 
 if (pending.length === 0) {
   console.log('All tiles done.');
-  process.exit(0);
+  if (!ARGS['rescan-placeholders']) {
+    process.exit(0);
+  }
 }
 
 const estSecsPerTile = (RENDER_CFG.tileWaitMs * 0.6 + RENDER_CFG.settleMaxMs * 0.5) / 1000 + 0.5;
 const estTotal = Math.round(pending.length * estSecsPerTile / NUM_WORKERS);
 console.log(`ETA ~ ${Math.floor(estTotal/60)}m${estTotal%60}s\n`);
 
-// ─── Dispatch workers ─────────────────────────────────────────────────────────
+
 
 const chunks = chunkArray(pending, NUM_WORKERS);
 const workerTemplate = {
@@ -169,6 +193,8 @@ const workerTemplate = {
   protocolTimeout: PROTOCOL_TIMEOUT,
   sessionMaxMs: SESSION_MAX_MS,
   checkpointPath: CHECKPOINT_PATH,
+  chromePath: CHROME_PATH,
+  headless: HEADLESS,
 };
 
 const workerStats = Array.from({ length: chunks.length }, () => ({
@@ -265,6 +291,10 @@ const workerPromises = chunks.map((chunk, i) => new Promise((resolve, reject) =>
       resolve(msg.stats);
     } else if (msg.type === 'error') {
       console.error(`\nWorker ${i} error:`, msg.error);
+      if (msg.code)     console.error(`  code:`, msg.code);
+      if (msg.syscall)  console.error(`  syscall:`, msg.syscall);
+      if (msg.path)     console.error(`  path:`, msg.path);
+      if (msg.stack)    console.error(`  stack:\n${msg.stack}`);
       reject(new Error(msg.error));
     }
   });
@@ -298,7 +328,7 @@ console.log('  Rate: ' + (totalDone / elapsed).toFixed(2) + ' tiles/s');
 
 if (totalFail > 0) console.log('\n' + totalFail + ' tiles failed — check render_errors_w*.log');
 
-// ─── Auto-retry missing/failed tiles ─────────────────────────────────────────
+
 
 const RETRY_ATTEMPTS   = 2;
 const RETRY_TIMEOUT_MS = 45000;
@@ -351,13 +381,17 @@ async function retryMissingTiles(tiles, outputDir, seedLat, seedLng, cfg, blankS
     let success = false;
 
     for (let attempt = 0; attempt < RETRY_ATTEMPTS && !success; attempt++) {
+      let tmpDir = null;
+      let w = null;
       try {
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `retry-${tile.qx}_${tile.qy}-`));
+        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `retry-${tile.qx}_${tile.qy}-`));
         const tmpHtml = path.join(tmpDir, `retry.html`);
         const userData = path.join(tmpDir, 'profile');
 
-        const worker = new Promise((resolve) => {
-          const w = new Worker(new URL('./src/tile/worker_entry.mjs', import.meta.url), {
+        let workerDone;
+        const workerPromise = new Promise((resolve) => {
+          workerDone = resolve;
+          w = new Worker(new URL('./src/tile/worker_entry.mjs', import.meta.url), {
             workerData: {
               tiles: [tile],
               workerId: 99,
@@ -373,21 +407,31 @@ async function retryMissingTiles(tiles, outputDir, seedLat, seedLng, cfg, blankS
               tmpHtmlPath: tmpHtml,
               userDataDir: userData,
               checkpointPath: null,
+              chromePath: CHROME_PATH,
+              headless: HEADLESS,
             },
           });
 
           w.on('message', m => {
-            if (m.type === 'tile_done') resolve({ ok: true });
-            else if (m.type === 'done') resolve({ ok: m.stats?.doneCount > 0 });
-            else if (m.type === 'error') resolve({ ok: false, error: m.error });
+            if (m.type === 'tile_done') workerDone({ ok: true });
+            else if (m.type === 'done') workerDone({ ok: (m.stats?.doneCount ?? 0) > 0 });
+            else if (m.type === 'error') workerDone({ ok: false, error: m.error });
           });
-          w.on('error', e => resolve({ ok: false, error: e.message }));
+          w.on('error', e => workerDone({ ok: false, error: e.message }));
         });
 
+        let timedOut = false;
         const result = await Promise.race([
-          worker,
-          new Promise(r => setTimeout(() => r({ ok: false, error: 'timeout' }), RETRY_TIMEOUT_MS))
+          workerPromise,
+          new Promise(r => setTimeout(() => {
+            timedOut = true;
+            r({ ok: false, error: 'timeout' });
+          }, RETRY_TIMEOUT_MS)),
         ]);
+
+        if (timedOut && w) {
+          try { await w.terminate(); } catch {}
+        }
 
         if (result.ok) {
           success = true;
@@ -398,9 +442,13 @@ async function retryMissingTiles(tiles, outputDir, seedLat, seedLng, cfg, blankS
             await new Promise(r => setTimeout(r, RETRY_BACKOFF_MS));
           }
         }
-
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-      } catch (e) {}
+      } catch {
+        if (w) { try { await w.terminate(); } catch {} }
+      } finally {
+        if (tmpDir) {
+          try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+        }
+      }
     }
 
     if (!success) {
@@ -450,7 +498,7 @@ async function retryMissingTiles(tiles, outputDir, seedLat, seedLng, cfg, blankS
 
     if (missingTiles.length === 0) break;
 
-    // No progress this round → further rounds won't help either, stop early.
+    // No progress → stop early
     if (roundSuccess === 0) {
       console.log(`[retry] No tiles recovered in round ${round}, stopping early (remaining tiles look permanently failing)`);
       break;
@@ -463,9 +511,97 @@ async function retryMissingTiles(tiles, outputDir, seedLat, seedLng, cfg, blankS
   }
 }
 
+
+async function rescanPlaceholdersOnDisk(outputDir) {
+  if (!fs.existsSync(outputDir)) return 0;
+  console.log('\n─── Rescan placeholders on disk ───');
+  const files = fs.readdirSync(outputDir).filter(f => f.endsWith('.png'));
+  console.log(`Scanning ${files.length} tiles...`);
+  const CONCURRENCY = 16;
+  let scanned = 0, deleted = 0;
+  const todo = [];
+
+  for (const f of files) {
+    todo.push((async () => {
+      const fp = path.join(outputDir, f);
+      try {
+        const buf = fs.readFileSync(fp);
+        if (await isPlaceholderPng(buf)) {
+          fs.unlinkSync(fp);
+          // also drop its meta if present
+          const m = f.match(/^tile_([+-]?\d+)_([+-]?\d+)_/);
+          if (m) {
+            const metaPath = path.join(outputDir, 'meta', `tile_${m[1]}_${m[2]}.json`);
+            try { fs.unlinkSync(metaPath); } catch {}
+          }
+          deleted++;
+          console.log(`  [placeholder] removed ${f}`);
+        }
+      } catch (e) {
+
+      } finally {
+        scanned++;
+        if (scanned % 500 === 0) {
+          console.log(`  …${scanned}/${files.length} scanned, ${deleted} placeholders`);
+        }
+      }
+    })());
+    if (todo.length >= CONCURRENCY) {
+      await Promise.all(todo.splice(0, todo.length));
+    }
+  }
+  await Promise.all(todo);
+  console.log(`Rescan complete: ${deleted}/${scanned} placeholders removed`);
+  return deleted;
+}
+
+if (ARGS['rescan-placeholders']) {
+  await rescanPlaceholdersOnDisk(OUTPUT_DIR);
+}
+
 await retryMissingTiles(pending, OUTPUT_DIR, seedLat, seedLng, RENDER_CFG, BLANK_SIZE_KB);
 
-// ─── Export outputs ──────────────────────────────────────────────────────────
+
+async function runPostBlend(rendersDir) {
+  if (ARGS['skip-post-blend']) {
+    console.log('\n[post-blend] Skipped (--skip-post-blend)');
+    return;
+  }
+  const scriptPath = path.join(PROJECT_ROOT, 'agent-tools', 'blend_2d_to_3d.py');
+  if (!fs.existsSync(scriptPath)) {
+    console.warn(`[post-blend] helper not found at ${scriptPath} — skipping`);
+    return;
+  }
+  console.log('\n[post-blend] Re-blending 2D tiles against 3D neighbours...');
+  const t0 = Date.now();
+
+  const candidates = ['python', 'python3'];
+  let result = null;
+  for (const cmd of candidates) {
+    const r = spawnSync(cmd, [scriptPath, rendersDir, '--verbose'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf-8',
+    });
+    if (r.error && r.error.code === 'ENOENT') continue;
+    result = r;
+    break;
+  }
+  if (!result) {
+    console.warn('[post-blend] python interpreter not found in PATH — skipping');
+    return;
+  }
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  if (result.status !== 0) {
+    console.warn(`[post-blend] helper exited with status=${result.status} (continuing)`);
+  } else {
+    console.log(`[post-blend] Done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  }
+}
+
+await runPostBlend(OUTPUT_DIR);
+
+
 
 console.log('\n─── Generate quadrants.geojson + generation_config.json ───');
 const { geojsonPath, configPath } = exportRenderOutputs({

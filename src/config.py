@@ -78,29 +78,9 @@ class PathsConfig:
     infra: str = "./geo/infra.geojson"
     output: str = "./output"
     renders: str = "./output/renders"
-    generate: str = "./generate_sample"
+    generate: str = "./generate"
     lora_dataset: str = "./lora_dataset"
     meta: str = "meta"
-
-
-@dataclass
-class InfillConfig:
-    """Infill/template parameters used by inference pipeline.
-
-    Source of truth for the AI-edit request template (red border, max area,
-    default prompt). Keeps inference module in sync with src/.
-    """
-    border_width: int = 2
-    border_color: tuple = (255, 0, 0, 255)
-    seam_color: tuple = (255, 0, 0, 255)
-    seam_thickness_px: int = 1
-    max_infill_area_ratio: float = 0.5  # 50% of template_size^2
-    default_prompt: str = (
-        "Fill in the outlined section with coherent pixels matching the <isometric pixel art> style, "
-        "seamlessly blending edges with surrounding areas, maintaining consistent isometric perspective, "
-        "shadow direction, lighting, pixel density, and color harmony while preserving structural integrity "
-        "and removing all border artifacts"
-    )
 
 
 @dataclass
@@ -109,7 +89,6 @@ class Config:
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     dzi: DZIConfig = field(default_factory=DZIConfig)
     render: RenderConfig = field(default_factory=RenderConfig)
-    infill: InfillConfig = field(default_factory=InfillConfig)
 
 
 def _apply_env_overrides(cfg: Config) -> Config:

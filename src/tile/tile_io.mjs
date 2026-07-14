@@ -5,22 +5,16 @@ import { TILE } from '../config.mjs';
 
 const HASH_LEN = TILE.hashLength;
 
-// ─── Path encoding/decoding ──────────────────────────────────────────────────
+
 
 export function signInt(n) {
   return n >= 0 ? `+${n}` : `${n}`;
 }
 
-/**
- * Regex match tile file name.
- * Format: ^tile_[+-]\d+_[+-]\d+_<{HASH_LEN}hex>.png$
- */
+// Regex: tile_[+-]\d+_[+-]\d+_<hash>.png
 export const TILE_FILE_RE = new RegExp(`^tile_[+-]\\d+_[+-]\\d+_([a-f0-9]{${HASH_LEN}})\\.png$`);
 
-/**
- * Regex match tile meta file name.
- * Format: ^tile_[+-]\d+_[+-]\d+\.json$
- */
+// Regex: tile_[+-]\d+_[+-]\d+.json
 export const TILE_META_RE = /^tile_[+-]\d+_[+-]\d+\.json$/;
 
 export function parseTileFilename(name) {
@@ -37,29 +31,21 @@ export function parseTileFilename(name) {
   };
 }
 
-/**
- * Build full filename (no dir) for tile PNG.
- */
+
 export function tileFilename(qx, qy, hash) {
   return `tile_${signInt(qx)}_${signInt(qy)}_${hash}.png`;
 }
 
-/**
- * Build full filename (no dir) for tile meta JSON.
- *   tileMetaFilename(0, 1) → "tile_+0_+1.json"
- */
+
 export function tileMetaFilename(qx, qy) {
   return `tile_${signInt(qx)}_${signInt(qy)}.json`;
 }
 
-/**
- * Compute content hash (8 hex chars) from PNG buffer.
- */
+
 export function computeHash(buf) {
   return crypto.createHash('sha256').update(buf).digest('hex').slice(0, HASH_LEN);
 }
 
-// ─── File paths ─────────────────────────────────────────────────────────────
 
 export function tileMetaPath(outputDir, qx, qy) {
   return path.join(outputDir, 'meta', tileMetaFilename(qx, qy));
@@ -68,8 +54,6 @@ export function tileMetaPath(outputDir, qx, qy) {
 export function tileDeletedMarkerPath(outputDir, qx, qy) {
   return path.join(outputDir, `.deleted_tile_${signInt(qx)}_${signInt(qy)}`);
 }
-
-// ─── File ops ───────────────────────────────────────────────────────────────
 
 function safeUnlink(fp) {
   try { fs.unlinkSync(fp); } catch { /* ignore */ }
@@ -123,7 +107,7 @@ export function findTile(outputDir, qx, qy) {
   if (fs.existsSync(metaPath)) {
     try {
       meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-    } catch { /* corrupt meta — ignore */ }
+    } catch { /* corrupt meta */ }
   }
 
   return {
@@ -157,9 +141,7 @@ export function markTileDeleted(outputDir, qx, qy) {
   } catch { /* best effort */ }
 }
 
-/**
- * Clear deletion marker.
- */
+
 export function clearTileDeletedMarker(outputDir, qx, qy) {
   safeUnlink(tileDeletedMarkerPath(outputDir, qx, qy));
 }
@@ -170,7 +152,7 @@ export function deleteTileWithMarker(outputDir, qx, qy) {
   deleteTileFiles(outputDir, qx, qy);
 }
 
-// ─── Listing & scanning ─────────────────────────────────────────────────────
+
 
 export function listTiles(outputDir) {
   let files = [];

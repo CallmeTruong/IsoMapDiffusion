@@ -320,18 +320,26 @@ window.analyzeCanvas = function() {
   // and edge density to sail past every check above and get saved as if
   // it were valid terrain.
   //
-  // Signature: this placeholder always uses one exact flat beige color as
-  // its background — measured as rgb(212, 206, 198) — and the text/dot are
-  // small and centered, so the four corners are *always* pure background.
-  // Real photorealistic terrain essentially never lands all 4 corners in
-  // this narrow, specific color range simultaneously.
-  const PLACEHOLDER_BG = { r: 212, g: 206, b: 198 };
-  const PLACEHOLDER_TOL = 12;
-  const isPlaceholderColor = s =>
-    Math.abs(s.r - PLACEHOLDER_BG.r) <= PLACEHOLDER_TOL &&
-    Math.abs(s.g - PLACEHOLDER_BG.g) <= PLACEHOLDER_TOL &&
-    Math.abs(s.b - PLACEHOLDER_BG.b) <= PLACEHOLDER_TOL;
-  const isGooglePlaceholder = corners.every(isPlaceholderColor);
+  // Signature: this placeholder uses one flat mid-gray color
+  // (rgb ~208, 208, 208) covering >90% of pixels, plus a small red/orange
+  // marker dot and a tiny amount of anti-aliased near-white text. The
+  // marker pixel is the cleanest discriminator — real photorealistic
+  // terrain essentially never lands a red marker on a flat gray field.
+  let midGray = 0;          // flat gray (180..235, near-equal channels)
+  let nearWhiteHalo = 0;    // text anti-aliasing (236..254)
+  let redMarker = 0;        // r > 150, g < 100, b < 100
+  for (const s of samples) {
+    const dr = Math.abs(s.r - s.g), dg = Math.abs(s.g - s.b);
+    if (dr < 8 && dg < 8) {
+      if (s.r >= 180 && s.r <= 235) midGray++;
+      else if (s.r >= 236 && s.r <= 254) nearWhiteHalo++;
+    } else if (s.r > 150 && s.g < 100 && s.b < 100) {
+      redMarker++;
+    }
+  }
+  const midGrayPct = (100 * midGray) / samples.length;
+  const haloPct    = (100 * nearWhiteHalo) / samples.length;
+  const isGooglePlaceholder = midGrayPct > 70 && redMarker >= 1 && haloPct >= 0.5 && haloPct < 15;
 
   return {
     isBlank: isBlank || isGooglePlaceholder,

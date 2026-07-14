@@ -1,7 +1,7 @@
 /**
  * worker.mjs — Worker thread logic for tile rendering
  *
- * Output format (xem src/tile/tile_io.mjs):
+ * Output format (see src/tile/tile_io.mjs):
  *   <outputDir>/tile_<qx>_<qy>_<hash>.png
  *   <outputDir>/meta/tile_<qx>_<qy>.json
  */
@@ -82,12 +82,6 @@ async function renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blank
         seedLat, seedLng,
       }, outputDir);
 
-      // Mark quadrant boundaries (single cell) for downstream stitching
-      parentPort?.postMessage({
-        type: 'db_update', qx: tile.qx, qy: tile.qy,
-        info: { workerId, variance: analysis.variance, renderMs },
-      });
-
       if (result.sizeKB >= blankSizeKb) {
         clearTileDeletedMarker(outputDir, tile.qx, tile.qy);
       } else {
@@ -99,11 +93,6 @@ async function renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blank
       return { ok: true, retries: attempt, ...result, variance: analysis.variance, renderMs };
     } catch (e) {
       if (attempt === effectiveMaxRetry - 1) {
-        parentPort?.postMessage({
-          type: 'db_update',
-          qx: tile.qx, qy: tile.qy,
-          info: { workerId, error: e.message },
-        });
         return { ok: false, error: e.message, retries: attempt };
       }
     }
@@ -117,7 +106,7 @@ export async function runWorker(workerData) {
     cfg, seedLng, seedLat,
     protocolTimeout, sessionMaxMs,
     tmpHtmlPath, userDataDir,
-    checkpointPath,
+    checkpointPath, chromePath,
   } = workerData;
 
   // Provider plugin
@@ -143,6 +132,27 @@ export async function runWorker(workerData) {
   const report = msg => parentPort.postMessage({ type: 'progress', workerId, msg });
   const done   = stats => parentPort.postMessage({ type: 'done', workerId, stats });
 
+  let browser = null;
+  // Always close the browser cleanly — even on any exception inside the main
+  // render loop, the retry pass, or `attemptFallbackNow`. Without this,
+  // a worker killed mid-render (or one that throws) leaves a Chromium child
+  // process with a blank top-level window pinned in DWM/the taskbar.
+  const closeBrowserSafely = async () => {
+    if (!browser || browser._closed) return;
+    try {
+      await Promise.race([
+        browser.close(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('browser.close timeout')), 3000)),
+      ]);
+    } catch (e) {
+      report(`[WARN] browser.close failed, killing process: ${e.message}`);
+      try {
+        const proc = browser.process?.();
+        if (proc && proc.exitCode === null) proc.kill('SIGKILL');
+      } catch { /* nothing left to do */ }
+    }
+  };
+
   // Graceful shutdown flag - when true, finish current tile but don't start new ones
   let draining = false;
   let currentTile = null;
@@ -152,15 +162,27 @@ export async function runWorker(workerData) {
     if (msg?.type === 'flush_checkpoint') {
       console.log(`[Worker ${workerId}] Draining, finishing current tile...`);
       draining = true;
-      // If not currently processing a tile, send done immediately
-      // If processing, we'll exit after current tile completes
     }
   });
 
   const { default: puppeteer } = await import('puppeteer');
 
-  const browser = await puppeteer.launch({
-    headless: true,
+  // Force `headless: 'shell'` regardless of what the main thread passed.
+  //
+  // Why: on Windows, `headless: true` (boolean) and `headless: 'new'` both end
+  // up creating a real top-level OS window in DWM/the taskbar when WebGL is
+  // enabled (ANGLE/d3d11 path used by Cesium). That window stays open as a
+  // blank white tab if `browser.close()` is skipped — which happens whenever
+  // the worker thread is killed by the parent (SIGTERM/timeout) before
+  // reaching the closing await at the end of runWorker.
+  //
+  // `headless: 'shell'` is the modern Chromium implementation that draws to
+  // an offscreen surface. No OS window, no taskbar entry, no leftover blank
+  // tab. It still supports WebGL via ANGLE/SwiftShader, which is what we
+  // need for Cesium. The redundant hidden-window flags below are belt &
+  // suspenders for the rare case where shell falls back to a non-shell mode.
+  const launchOpts = {
+    headless: 'shell',
     protocolTimeout,
     userDataDir: userData,
     args: [
@@ -174,9 +196,15 @@ export async function runWorker(workerData) {
       '--safebrowsing-disable-auto-update', '--hide-scrollbars',
       '--disable-backgrounding-occluded-windows', '--disable-hang-monitor',
       '--disable-prompt-on-repost', '--disable-popup-blocking',
+      '--no-startup-window',
+      '--no-default-browser-check',
+      '--noerrdialogs',
+      '--disable-session-crashed-bubble',
+      '--disable-infobars',
       `--window-size=${cfg.sizePx},${cfg.sizePx}`,
     ],
-  });
+  };
+  if (chromePath) launchOpts.executablePath = chromePath;
 
   fs.mkdirSync(userData, { recursive: true });
   const htmlArgs = { tilesetJs, ionReset };
@@ -186,177 +214,111 @@ export async function runWorker(workerData) {
   let sessionStart = Date.now();
   let sessionCount = 1;
 
-  async function createPage() {
-    const p = await browser.newPage();
-    p.on('console', m => { if (m.type() === 'error') report('[Browser] ' + m.text()); });
-    await p.setViewport({ width: cfg.sizePx, height: cfg.sizePx, deviceScaleFactor: 1 });
-    await p.goto(fileUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    await p.waitForFunction('typeof window.renderTile === "function"', { timeout: 30_000 });
-    await p.waitForFunction('window.isSessionOk()', { timeout: 30_000, polling: 200 });
-    await sleep(2000);
-    return p;
-  }
+  // ─── Render loop ──────────────────────────────────────────────────────────
 
-  let page = await createPage();
-  report('Session ready');
-
-  if (cfg?.fallback?.enabled && !cfg.fallback.urlTemplate) {
-    report('[WARN] fallback.enabled=true but fallback.urlTemplate is missing — ' +
-           'blank tiles will NOT be recoverable via 2D fallback until this is set in config.');
-  }
-
-  let pending = filterPendingTiles(tiles, outputDir, blankSizeKb);
-  let doneSet = null;
   try {
-    if (checkpointPath && fs.existsSync(checkpointPath)) {
-      const cp = JSON.parse(fs.readFileSync(checkpointPath, 'utf8'));
-      if (Array.isArray(cp.doneTiles)) {
-        doneSet = new Set(cp.doneTiles.map(t => `${t.qx},${t.qy}`));
-      }
+    browser = await puppeteer.launch(launchOpts);
+
+    async function createPage() {
+      const p = await browser.newPage();
+      p.on('console', m => { if (m.type() === 'error') report('[Browser] ' + m.text()); });
+      await p.setViewport({ width: cfg.sizePx, height: cfg.sizePx, deviceScaleFactor: 1 });
+      await p.goto(fileUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+      await p.waitForFunction('typeof window.renderTile === "function"', { timeout: 30_000 });
+      await p.waitForFunction('window.isSessionOk()', { timeout: 30_000, polling: 200 });
+      await sleep(2000);
+      return p;
     }
-  } catch { /* ignore */ }
-  pending = sortPendingByPriority(pending, outputDir, blankSizeKb, doneSet);
 
-  let doneCount = 0, failCount = 0, retryCount = 0;
-  const failed = [];
-  const blankUnrecovered = [];   // blank tiles where fallback also failed/disabled — for final summary only
-  let errLogBuffer = '';
-  let pageReady = true;
+    let page = await createPage();
+    report('Session ready');
 
-  const MAX_PAGE_RECOVERIES = 3; // per tile, if the browser session dies mid-render
+    if (cfg?.fallback?.enabled && (!Array.isArray(cfg.fallback.providers) || cfg.fallback.providers.length === 0)) {
+      report('[WARN] fallback.enabled=true but fallback.providers[] is empty — ' +
+             'blank tiles will NOT be recoverable via 2D fallback until this is set in config.');
+    }
 
-  async function attemptFallbackNow(tile) {
-    if (!cfg?.fallback?.enabled) {
+    let pending = filterPendingTiles(tiles, outputDir, blankSizeKb);
+    let doneSet = null;
+    try {
+      if (checkpointPath && fs.existsSync(checkpointPath)) {
+        const cp = JSON.parse(fs.readFileSync(checkpointPath, 'utf8'));
+        if (Array.isArray(cp.doneTiles)) {
+          doneSet = new Set(cp.doneTiles.map(t => `${t.qx},${t.qy}`));
+        }
+      }
+    } catch { /* ignore */ }
+    pending = sortPendingByPriority(pending, outputDir, blankSizeKb, doneSet);
+
+    let doneCount = 0, failCount = 0, retryCount = 0;
+    const failed = [];
+    const blankUnrecovered = [];
+    let errLogBuffer = '';
+    let pageReady = true;
+    // Tiles deferred because the page was not ready — processed after recovery.
+    // NEVER push into `pending` while iterating it (causes infinite growth →
+    // RangeError: Invalid array length at Array.push in worker.mjs:289).
+    const pageNotReadyQueue = [];
+
+    const MAX_PAGE_RECOVERIES = 3;
+
+    async function attemptFallbackNow(tile) {
+      if (!cfg?.fallback?.enabled) {
+        failCount++;
+        blankUnrecovered.push(tile);
+        report(`${doneCount}/${pending.length} tiles done, ${failCount} fail, ${retryCount} retry`);
+        return;
+      }
+      const r = await renderFallback2D(tile, seedLng, seedLat, cfg, outputDir, parentPort, workerId);
+      if (r.ok) {
+        doneCount++;
+        retryCount += r.retries ?? 0;
+        parentPort?.postMessage({ type: 'tile_done', workerId, qx: tile.qx, qy: tile.qy });
+        report(`${doneCount}/${pending.length} tiles done, ${failCount} fail, ${retryCount} retry`);
+        return;
+      }
+
+      // 2D fallback failed (all providers exhausted) — no further synthesis
+      // is attempted. The tile is logged and left unrecovered.
+      errLogBuffer += `[FALLBACK] ${new Date().toISOString()} tile(${tile.qx},${tile.qy}): ${r.error}\n`;
+      try { fs.appendFileSync(errLog, errLogBuffer); errLogBuffer = ''; } catch {}
+
       failCount++;
       blankUnrecovered.push(tile);
       report(`${doneCount}/${pending.length} tiles done, ${failCount} fail, ${retryCount} retry`);
-      return;
-    }
-    const r = await renderFallback2D(tile, seedLng, seedLat, cfg, outputDir, parentPort, workerId);
-    if (r.ok) {
-      doneCount++;
-      retryCount += r.retries ?? 0;
-      parentPort?.postMessage({ type: 'tile_done', workerId, qx: tile.qx, qy: tile.qy });
-    } else {
-      failCount++;
-      blankUnrecovered.push(tile);
-      errLogBuffer += `[FALLBACK] ${new Date().toISOString()} tile(${tile.qx},${tile.qy}): ${r.error}\n`;
-      try { fs.appendFileSync(errLog, errLogBuffer); errLogBuffer = ''; } catch {}
-    }
-    report(`${doneCount}/${pending.length} tiles done, ${failCount} fail, ${retryCount} retry`);
-  }
-
-  for (const tile of pending) {
-    if (!pageReady) {
-      pending.push(tile);
-      continue;
     }
 
-    // Check if we're draining - skip remaining tiles after current one finishes
-    if (draining && currentTile === null) {
-      currentTile = tile;
-      console.log(`[Worker ${workerId}] Draining: finishing tile (${tile.qx},${tile.qy}) then stopping`);
-    }
-    if (draining && currentTile !== tile) {
-      console.log(`[Worker ${workerId}] Skipping tile (${tile.qx},${tile.qy}) due to drain`);
-      continue;
-    }
-
-    if (Date.now() - sessionStart >= sessionMaxMs && pageReady) {
-      report('Restarting page (full GPU reset)...');
-      pageReady = false;
-      try { await page.close(); } catch { /* ignore */ }
-      page = await createPage();
-      sessionCount++;
-      sessionStart = Date.now();
-      pageReady = true;
-      report(`Session #${sessionCount} ready`);
-    }
-
-    // Render with automatic recovery
-    let result;
-    for (let recovery = 0; ; recovery++) {
-      result = await renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blankSizeKb, maxRetry, parentPort, workerId);
-
-      const fatal = !result.ok && !result.isBlank && isFatalPageError(result.error);
-      if (!fatal || recovery >= MAX_PAGE_RECOVERIES) break;
-
-      report(`[WARN] Page died (${result.error}) on tile (${tile.qx},${tile.qy}), recreating session (recovery ${recovery + 1}/${MAX_PAGE_RECOVERIES})...`);
-      pageReady = false;
-      try { await page.close(); } catch { /* ignore */ }
-      try {
-        page = await createPage();
-        sessionCount++;
-        sessionStart = Date.now();
-        pageReady = true;
-      } catch (e) {
-        report(`[WARN] Failed to recreate page: ${e.message}`);
-        pageReady = false;
-        break;
-      }
-    }
-
-    // After this tile completes, if draining, finish up
-    if (draining && currentTile === tile) {
-      console.log(`[Worker ${workerId}] Tile (${tile.qx},${tile.qy}) done, exiting gracefully`);
-      if (result.ok) {
-        doneCount++;
-        parentPort?.postMessage({
-          type: 'tile_done', workerId,
-          qx: tile.qx, qy: tile.qy,
-          variance: result.variance, renderMs: result.renderMs,
-        });
-      }
-      await browser.close();
-      cleanup();
-      done({ doneCount, failCount, retryCount, sessionCount });
-      return; // Exit worker
-    }
-
-    if (result.ok) {
-      doneCount++;
-      retryCount += result.retries;
-      parentPort?.postMessage({
-        type: 'tile_done', workerId,
-        qx: tile.qx, qy: tile.qy,
-        variance: result.variance, renderMs: result.renderMs,
-      });
-    } else if (result.isBlank) {
-      retryCount += result.retries;
-      errLogBuffer += `[BLANK] ${new Date().toISOString()} tile(${tile.qx},${tile.qy}): ${result.error}\n`;
-      try { fs.appendFileSync(errLog, errLogBuffer); errLogBuffer = ''; } catch {}
-      // Try to recover it immediately via 2D fallback instead of queueing
-      // for a giant batch pass at the very end of the run.
-      await attemptFallbackNow(tile);
-      continue; // attemptFallbackNow already reports progress
-    } else {
-      failCount++;
-      retryCount += result.retries;
-      failed.push(tile);
-      errLogBuffer += `[MAIN] ${new Date().toISOString()} tile(${tile.qx},${tile.qy}): ${result.error}\n`;
-      try { fs.appendFileSync(errLog, errLogBuffer); errLogBuffer = ''; } catch {}
-    }
-
-    report(`${doneCount}/${pending.length} tiles done, ${failCount} fail, ${retryCount} retry`);
-  }
-
-  if (errLogBuffer) fs.appendFileSync(errLog, errLogBuffer);
-
-  if (failed.length > 0) {
-    report(`Retry pass: ${failed.length} tiles`);
-    errLogBuffer = '';
-    for (const tile of failed) {
+    for (const tile of pending) {
       if (!pageReady) {
-        failed.push(tile);  // push back; will retry on next pass
+        // Do NOT push back into `pending` — that mutates the array we are
+        // iterating and causes unbounded growth → RangeError.
+        pageNotReadyQueue.push(tile);
         continue;
       }
+
+      // Drain tiles that were deferred while the page was recovering.
+      while (pageReady && pageNotReadyQueue.length > 0) {
+        pending.push(pageNotReadyQueue.shift());
+      }
+
+      if (draining && currentTile === null) {
+        currentTile = tile;
+        console.log(`[Worker ${workerId}] Draining: finishing tile (${tile.qx},${tile.qy}) then stopping`);
+      }
+      if (draining && currentTile !== tile) {
+        console.log(`[Worker ${workerId}] Skipping tile (${tile.qx},${tile.qy}) due to drain`);
+        continue;
+      }
+
       if (Date.now() - sessionStart >= sessionMaxMs && pageReady) {
+        report('Restarting page (full GPU reset)...');
         pageReady = false;
         try { await page.close(); } catch { /* ignore */ }
         page = await createPage();
         sessionCount++;
         sessionStart = Date.now();
         pageReady = true;
+        report(`Session #${sessionCount} ready`);
       }
 
       let result;
@@ -366,7 +328,7 @@ export async function runWorker(workerData) {
         const fatal = !result.ok && !result.isBlank && isFatalPageError(result.error);
         if (!fatal || recovery >= MAX_PAGE_RECOVERIES) break;
 
-        report(`[WARN] Page died (${result.error}) on retry tile (${tile.qx},${tile.qy}), recreating session (recovery ${recovery + 1}/${MAX_PAGE_RECOVERIES})...`);
+        report(`[WARN] Page died (${result.error}) on tile (${tile.qx},${tile.qy}), recreating session (recovery ${recovery + 1}/${MAX_PAGE_RECOVERIES})...`);
         pageReady = false;
         try { await page.close(); } catch { /* ignore */ }
         try {
@@ -381,32 +343,126 @@ export async function runWorker(workerData) {
         }
       }
 
+      // If draining, finalize and break out of the loop — `finally` still
+      // closes the browser.
+      if (draining && currentTile === tile) {
+        console.log(`[Worker ${workerId}] Tile (${tile.qx},${tile.qy}) done, exiting gracefully`);
+        if (result.ok) {
+          doneCount++;
+          parentPort?.postMessage({
+            type: 'tile_done', workerId,
+            qx: tile.qx, qy: tile.qy,
+            variance: result.variance, renderMs: result.renderMs,
+          });
+        }
+        done({ doneCount, failCount, retryCount, sessionCount });
+        break;
+      }
+
       if (result.ok) {
         doneCount++;
-        failCount--;
-        parentPort?.postMessage({ type: 'tile_done', workerId, qx: tile.qx, qy: tile.qy });
+        retryCount += result.retries;
+        parentPort?.postMessage({
+          type: 'tile_done', workerId,
+          qx: tile.qx, qy: tile.qy,
+          variance: result.variance, renderMs: result.renderMs,
+        });
       } else if (result.isBlank) {
-        failCount--; // was counted in `failed`; attemptFallbackNow will re-count if it still fails
-        errLogBuffer += `[BLANK-RETRY] ${new Date().toISOString()} tile(${tile.qx},${tile.qy}): ${result.error}\n`;
+        retryCount += result.retries;
+        errLogBuffer += `[BLANK] ${new Date().toISOString()} tile(${tile.qx},${tile.qy}): ${result.error}\n`;
         try { fs.appendFileSync(errLog, errLogBuffer); errLogBuffer = ''; } catch {}
         await attemptFallbackNow(tile);
+        continue;
       } else {
-        errLogBuffer += `[RETRY] ${new Date().toISOString()} tile(${tile.qx},${tile.qy}): ${result.error}\n`;
+        failCount++;
+        retryCount += result.retries;
+        failed.push(tile);
+        errLogBuffer += `[MAIN] ${new Date().toISOString()} tile(${tile.qx},${tile.qy}): ${result.error}\n`;
         try { fs.appendFileSync(errLog, errLogBuffer); errLogBuffer = ''; } catch {}
       }
+
+      report(`${doneCount}/${pending.length} tiles done, ${failCount} fail, ${retryCount} retry`);
     }
+
     if (errLogBuffer) fs.appendFileSync(errLog, errLogBuffer);
+
+    // Retry pass for tiles that failed without being marked blank
+    if (failed.length > 0 && !draining) {
+      report(`Retry pass: ${failed.length} tiles`);
+      errLogBuffer = '';
+      const retryQueue = [];
+      for (const tile of failed) {
+        if (!pageReady) {
+          // Same fix: never push back into the array we are iterating.
+          retryQueue.push(tile);
+          continue;
+        }
+        // Drain any deferred retry tiles when the page recovers.
+        while (pageReady && retryQueue.length > 0) {
+          failed.push(retryQueue.shift());
+        }
+        if (Date.now() - sessionStart >= sessionMaxMs && pageReady) {
+          pageReady = false;
+          try { await page.close(); } catch { /* ignore */ }
+          page = await createPage();
+          sessionCount++;
+          sessionStart = Date.now();
+          pageReady = true;
+        }
+
+        let result;
+        for (let recovery = 0; ; recovery++) {
+          result = await renderOneTile(page, tile, seedLng, seedLat, cfg, outputDir, blankSizeKb, maxRetry, parentPort, workerId);
+
+          const fatal = !result.ok && !result.isBlank && isFatalPageError(result.error);
+          if (!fatal || recovery >= MAX_PAGE_RECOVERIES) break;
+
+          report(`[WARN] Page died (${result.error}) on retry tile (${tile.qx},${tile.qy}), recreating session (recovery ${recovery + 1}/${MAX_PAGE_RECOVERIES})...`);
+          pageReady = false;
+          try { await page.close(); } catch { /* ignore */ }
+          try {
+            page = await createPage();
+            sessionCount++;
+            sessionStart = Date.now();
+            pageReady = true;
+          } catch (e) {
+            report(`[WARN] Failed to recreate page: ${e.message}`);
+            pageReady = false;
+            break;
+          }
+        }
+
+        if (result.ok) {
+          doneCount++;
+          failCount--;
+          parentPort?.postMessage({ type: 'tile_done', workerId, qx: tile.qx, qy: tile.qy });
+        } else if (result.isBlank) {
+          failCount--;
+          errLogBuffer += `[BLANK-RETRY] ${new Date().toISOString()} tile(${tile.qx},${tile.qy}): ${result.error}\n`;
+          try { fs.appendFileSync(errLog, errLogBuffer); errLogBuffer = ''; } catch {}
+          await attemptFallbackNow(tile);
+        } else {
+          errLogBuffer += `[RETRY] ${new Date().toISOString()} tile(${tile.qx},${tile.qy}): ${result.error}\n`;
+          try { fs.appendFileSync(errLog, errLogBuffer); errLogBuffer = ''; } catch {}
+        }
+      }
+      if (errLogBuffer) fs.appendFileSync(errLog, errLogBuffer);
+    }
+
+    if (blankUnrecovered.length > 0) {
+      report(`${blankUnrecovered.length} blank tiles could not be recovered via fallback`);
+    }
+
+    if (errLogBuffer) fs.appendFileSync(errLog, errLogBuffer);
+
+    done({ doneCount, failCount, retryCount, sessionCount });
+  } finally {
+    // GUARANTEED cleanup — runs on normal exit, exception, or abrupt
+    // process.exit from the parent. Kills Chromium first (the source of the
+    // blank-window symptom), then deletes the temp profile directory.
+    await closeBrowserSafely();
+    try { cleanup(); } catch {}
   }
-
-  if (blankUnrecovered.length > 0) {
-    report(`${blankUnrecovered.length} blank tiles could not be recovered via fallback`);
-  }
-
-  if (errLogBuffer) fs.appendFileSync(errLog, errLogBuffer);
-
-  await browser.close();
-  cleanup();
-  done({ doneCount, failCount, retryCount, sessionCount });
 }
 
 export function startWorkerIfWorkerThread() {

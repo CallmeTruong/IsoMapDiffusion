@@ -5,9 +5,7 @@ import { TILE, TILE_SIZE_M, QUADRANT_M, CELL_SIZE_M, PATHS } from '../config.mjs
 import { findTile, listTiles, tileBounds } from '../tile/tile_io.mjs';
 import { tileIndexToLatLng } from '../tile/coords.mjs';
 
-/**
- * Build rotated polygon
- */
+
 function buildRotatedPolygon(qx, qy, seedLat, seedLng, cfg) {
   const headingRad = cfg.azimuth * Math.PI / 180;
   const cosH = Math.cos(headingRad);
@@ -26,18 +24,7 @@ function buildRotatedPolygon(qx, qy, seedLat, seedLng, cfg) {
   return [ring];
 }
 
-/**
- * Build quadrants.geojson FeatureCollection.
- *
- * @param {Object} opts
- * @param {Map} opts.quadrantStatus - Map<"qx,qy", "LAND"|"INFRA"|"SKIP">
- * @param {string} opts.outputDir
- * @param {number} opts.seedLat
- * @param {number} opts.seedLng
- * @param {Object} opts.cfg - renderCfg
- * @param {number} opts.blankSizeKb
- * @returns {string} path to saved geojson
- */
+
 export function buildQuadrantsGeojson({ quadrantStatus, outputDir, seedLat, seedLng, cfg, blankSizeKb }) {
   const features = [];
   for (const [key, status] of quadrantStatus) {
@@ -78,9 +65,7 @@ export function buildQuadrantsGeojson({ quadrantStatus, outputDir, seedLat, seed
   return outPath;
 }
 
-/**
- * Build generation_config.json
- */
+
 export function buildGenerationConfig({ outputDir, seedLat, seedLng, cfg, manifestFile, projectRoot, sessionCount = 0 }) {
   const allTiles = listTiles(outputDir);
   const bounds = tileBounds(allTiles);

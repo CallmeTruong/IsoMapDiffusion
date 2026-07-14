@@ -82,16 +82,7 @@ export function quadrantRCToLatLng(col, row, seedLat, seedLng, renderCfg) {
   };
 }
 
-/**
- *Convert tile (qx, qy) in TILE INDEX space
- * → lat/lng camera center.
- * @param {number} qx — tile x index
- * @param {number} qy — tile y index
- * @param {number} seedLat
- * @param {number} seedLng
- * @param {Object} renderCfg
- * @returns {{lat, lng, east_m, north_m}}
- */
+// Convert tile index (qx, qy) → lat/lng camera center
 export function tileIndexToLatLng(qx, qy, seedLat, seedLng, renderCfg) {
   const { sizePx, frustumW, azimuth, elevation, cameraMoveStep } = renderCfg;
 
@@ -116,7 +107,7 @@ export function tileIndexToLatLng(qx, qy, seedLat, seedLng, renderCfg) {
   const shift_right_meters = shift_x_px * metersPerPixel;
   const shift_up_meters = shift_y_px * metersPerPixel;
 
-  // 3. Convert screen → rotated world (theo elevation)
+  // 3. Convert screen → rotated world (according to elevation)
   const elev_rad = elevation * Math.PI / 180;
   const sin_elev = Math.sin(elev_rad);
   if (Math.abs(sin_elev) < 1e-6) {
@@ -145,9 +136,7 @@ export function tileIndexToLatLng(qx, qy, seedLat, seedLng, renderCfg) {
   };
 }
 
-/**
- * Convert lat/lng to quadrant coordinates.
- */
+// Convert lat/lng to quadrant coordinates
 export function latLngToQxy(lat, lng, seedLat, seedLng, quadrantStepM) {
   const deltaNorthM = (lat - seedLat) * M_PER_DEG_LAT;
   const deltaEastM  = (lng - seedLng) * M_PER_DEG_LAT * Math.cos(seedLat * Math.PI / 180);

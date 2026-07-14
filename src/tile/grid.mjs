@@ -3,6 +3,8 @@ import path from 'path';
 import { latLngToQxy } from './coords.mjs';
 import { CELL_SIZE_M } from '../config.mjs';
 
+export { filterPendingTiles } from './quality.mjs';
+
 export function computeSeedPoint(manifest, outputDir = null) {
   if (outputDir) {
     const seedFile = path.join(outputDir, 'seed.json');
