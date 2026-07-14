@@ -1,7 +1,3 @@
-/**
- * tile/stitch.mjs — FACADE re-export from tile/stitch/*
- */
-
 export { computeStride, stitchTestOffsets, computeLayout, defaultStride } from './stitch/layout.mjs';
 export { createBaseCanvas, stitchTiles, stitchPair }                  from './stitch/compose.mjs';
 export { annotateSeams, buildSeamSvg, rgbaStr }                        from './stitch/annotate.mjs';

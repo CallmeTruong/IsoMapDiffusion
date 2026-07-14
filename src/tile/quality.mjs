@@ -7,7 +7,6 @@ import {
   tileDeletedMarkerPath,
 } from './tile_io.mjs';
 
-// ─── Thresholds ────────────────────────────────────────────────────────────
 
 export function getThresholds(overrides = {}) {
   return {
@@ -18,7 +17,7 @@ export function getThresholds(overrides = {}) {
   };
 }
 
-// ─── Internal helpers ──────────────────────────────────────────────────────
+
 
 function isMetaBad(meta, thr) {
   if (!meta) return false;
@@ -33,7 +32,7 @@ function safeUnlink(fp) {
   try { fs.unlinkSync(fp); } catch { /* ignore */ }
 }
 
-// ─── Re-exports from tile_io for convenience ──────────────────────────────
+
 
 export {
   markTileDeleted,
@@ -43,7 +42,7 @@ export {
   tileMetaPath,
 } from './tile_io.mjs';
 
-// ─── Tile validity checks ─────────────────────────────────────────────────
+
 
 export function isTileValid(outputDir, qx, qy, thr = null) {
   const t = thr || getThresholds();
@@ -109,11 +108,9 @@ export function getTileInvalidReason(outputDir, qx, qy, thr = null, wasRenderedB
   return null;
 }
 
-// ─── Filter + Priority sort ────────────────────────────────────────────────
+// Priority order: user-deleted > missing > corrupt > blurry
 
-/**
- * Filter tiles
- */
+
 export function filterPendingTiles(tiles, outputDir, blankSizeKb = null) {
   if (!fs.existsSync(outputDir)) return tiles.slice();
   if (tiles.length === 0) return [];
@@ -125,9 +122,7 @@ export function filterPendingTiles(tiles, outputDir, blankSizeKb = null) {
   return tiles.filter(tile => !isTileValid(outputDir, tile.qx, tile.qy, thr));
 }
 
-/**
- * Filter + tag reason
- */
+
 export function filterAndTagPending(tiles, outputDir, blankSizeKb = null, doneSet = null) {
   if (!fs.existsSync(outputDir)) {
     return tiles.map(t => ({ ...t, _invalidReason: 'missing' }));
@@ -147,12 +142,10 @@ export function filterAndTagPending(tiles, outputDir, blankSizeKb = null, doneSe
     .filter(Boolean);
 }
 
-// Priority order: user-deleted > missing > corrupt > blurry
+
 const PRIORITY_ORDER = { 'user-deleted': 0, missing: 1, corrupt: 2, blurry: 3 };
 
-/**
- * Sort pending tiles
- */
+
 export function sortPendingByPriority(pending, outputDir, blankSizeKb = null, doneSet = null) {
   if (pending.length === 0) return [];
 

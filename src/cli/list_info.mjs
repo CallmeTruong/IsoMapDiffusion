@@ -1,7 +1,3 @@
-/**
- * cli/list_info.mjs — cmdList + cmdInfo
- */
-
 import fs from 'fs';
 import path from 'path';
 

@@ -1,7 +1,3 @@
-/**
- * render/index.mjs — Re-export facade cho render/*
- */
-
 export {
   projectRoot, loadEnv, parseArgs,
   resolveNumWorkers, buildRenderCfg, resolveCredentials,

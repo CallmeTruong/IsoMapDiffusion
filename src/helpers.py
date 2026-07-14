@@ -1,10 +1,5 @@
-"""
-src/helpers.py
+"""Helper functions for the isometric pipeline."""
 
-Helper functions for the isometric pipeline.
-"""
-
-import os
 from pathlib import Path
 
 
@@ -26,13 +21,3 @@ def get_project_root() -> Path:
 def ensure_dir(path: Path):
     """Ensure directory exists."""
     path.mkdir(parents=True, exist_ok=True)
-
-
-def parse_env_bool(val: str) -> bool:
-    """Parse environment variable as boolean."""
-    return val.lower() in ('true', '1', 'yes', 'on')
-
-
-def parse_env_list(val: str, delimiter: str = ',') -> list:
-    """Parse comma-separated environment variable."""
-    return [s.strip() for s in val.split(delimiter) if s.strip()]

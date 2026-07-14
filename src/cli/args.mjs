@@ -1,7 +1,3 @@
-/**
- * cli/args.mjs — CLI argument parser + help text
- */
-
 import { STITCH } from '../config.mjs';
 
 /**

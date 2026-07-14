@@ -1,18 +1,18 @@
 /**
- * tile/stitch/layout.mjs — Tính toán layout cho stitch grid
+ * tile/stitch/layout.mjs — Layout computation for stitch grids.
  *
- * Pure functions: không phụ thuộc sharp/fs, chỉ tính toán.
- * Gồm: computeStride, stitchTestOffsets, computeLayout.
+ * Pure functions: no sharp/fs dependency, only arithmetic.
+ * Exports: computeStride, stitchTestOffsets, computeLayout.
  */
 
 import { TILE } from '../../config.mjs';
 
 /**
- * Tính stride (pixel offset giữa 2 tile kề) từ config render.
+ * Compute stride (pixel offset between two adjacent tiles) from render config.
  *
  * @param {Object} cfg
- * @param {number} cfg.tileSize       - Kích thước mỗi tile (px), thường 1024
- * @param {number} cfg.cameraMoveStep - Fraction frustum camera dịch giữa 2 tile
+ * @param {number} cfg.tileSize       - Tile size in px (typically 1024)
+ * @param {number} cfg.cameraMoveStep - Fraction of frustum camera shifts between two tiles.
  *                                      0.5 = 50% overlap (recommended)
  *                                      1.0 = 0% overlap (no seam check)
  * @returns {number} stride_px
@@ -33,11 +33,11 @@ export function computeStride({ tileSize, cameraMoveStep }) {
 }
 
 /**
- * Tạo 4 offset để test stitch: 0% / 25% / 50% / 75% overlap.
- * Dùng cho debug khi muốn xem offset nào cho seam khớp.
+ * Generate 4 offsets to test stitch: 0% / 25% / 50% / 75% overlap.
+ * Useful for debugging which offset produces the best seam alignment.
  *
- * @param {number} tileSize - Kích thước mỗi tile (px)
- * @returns {number[]} Mảng 4 offset: [0, 0.25·tileSize, 0.5·tileSize, 0.75·tileSize]
+ * @param {number} tileSize - Tile size in px
+ * @returns {number[]} Array of 4 offsets: [0, 0.25·tileSize, 0.5·tileSize, 0.75·tileSize]
  */
 export function stitchTestOffsets(tileSize) {
   if (typeof tileSize !== 'number' || tileSize <= 0) {
@@ -47,14 +47,14 @@ export function stitchTestOffsets(tileSize) {
 }
 
 /**
- * Tính layout (kích thước map + vị trí pixel từng tile) cho grid N×N hoặc N×M.
+ * Compute layout (map size + per-tile pixel position) for an N×N or N×M grid.
  *
  * @param {Object} opts
- * @param {number} opts.gridSize - Grid N (vuông nếu không có gridCols/gridRows)
- * @param {number} opts.tileSize - Kích thước mỗi tile (px)
- * @param {number} opts.stride   - Pixel offset giữa 2 tile kề
- * @param {number} [opts.gridCols] - Số cột (mặc định = gridSize)
- * @param {number} [opts.gridRows] - Số hàng (mặc định = gridSize)
+ * @param {number} opts.gridSize - Grid N (square if gridCols/gridRows not provided)
+ * @param {number} opts.tileSize - Tile size in px
+ * @param {number} opts.stride   - Pixel offset between two adjacent tiles
+ * @param {number} [opts.gridCols] - Number of columns (default = gridSize)
+ * @param {number} [opts.gridRows] - Number of rows (default = gridSize)
  * @returns {{
  *   mapW: number, mapH: number,
  *   tileSize: number, stride: number, gridSize: number,
@@ -87,7 +87,7 @@ export function computeLayout({ gridSize, tileSize, stride, gridCols, gridRows }
   };
 }
 
-/** Default stride từ TILE config (cho caller tiện dùng) */
+/** Default stride from TILE config (convenience for callers). */
 export function defaultStride() {
   return computeStride({ tileSize: TILE.sizePx, cameraMoveStep: TILE.cameraMoveStep });
 }

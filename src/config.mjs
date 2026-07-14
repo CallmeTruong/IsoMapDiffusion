@@ -1,14 +1,12 @@
-/**
- * config.mjs — Central configuration for isometric pipeline
- */
+// Central configuration for isometric pipeline
 
 import { cpus } from 'os';
 import path from 'path';
 
-// ─── Defaults registry ───────────────────────────────────────────────────
+
 
 const DEFAULTS = {
-  // ─── PATHS ───────────────────────────────────────────────────────────
+
   PATHS: {
     districts:        './districts',
     water:            './geo/water.geojson',
@@ -25,13 +23,13 @@ const DEFAULTS = {
     generationConfig: 'generation_config.json',  // generation config filename
   },
 
-  // ─── GRID ────────────────────────────────────────────────────────────
+
   GRID: {
     cellSizeKm:   0.1,
     minWaterM2:   250,
   },
 
-  // ─── TILE (1 tile = 1 image 1024×1024) ────────────────────────────────
+
   TILE: {
     sizePx:           1024,
     azimuth:          180,
@@ -57,134 +55,129 @@ const DEFAULTS = {
     // Retry
     maxRetry:         3,
 
-    // 2D Fallback (for tiles where 3D render fails/blank)
+
     fallback: {
-      enabled:        true,    // Enable 2D satellite fallback
-      provider:      'esri',   // esri | mapbox | osm
-      maxRetries3D:  3,       // Max 3D retries before fallback
-      urlTemplate:   'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-      minZoom:       14,       // zoom level used to compute slippy x/y for the fallback fetch
-      requestTimeoutMs: 8000,  // fetch timeout for the fallback tile request
-      // Post-process look (see postProcess2D in fallback_2d.mjs) — defaults
+      enabled:        true,
+      maxRetries3D:  3,
+      requestTimeoutMs: 8000,
+      // Satellite/aerial providers queried by explicit BBOX (not slippy z/x/y).
+      // ESRI first (best resolution), EOX Sentinel-2 last (global coverage).
+      providers: [
+        {
+          name: 'esri',
+          urlTemplate: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export'
+            + '?bbox={minx},{miny},{maxx},{maxy}&bboxSR=3857&imageSR=3857&size={w},{h}&format=png32&f=image',
+        },
+        // EOX Sentinel-2 cloudless — global, gap-free (~10m/px native resolution)
+        {
+          name: 'eox-s2cloudless',
+          urlTemplate: 'https://tiles.maps.eox.at/wms?service=WMS&version=1.1.1&request=GetMap'
+            + '&layers=s2cloudless-2024_3857&styles=&bbox={minx},{miny},{maxx},{maxy}'
+            + '&width={w}&height={h}&srs=EPSG:3857&format=image/jpeg',
+          attribution: 'Sentinel-2 cloudless - https://s2maps.eu by EOX IT Services GmbH (CC BY-NC-SA 4.0, non-commercial only)',
+        },
+      ],
+
       postProcess:    'desat-sepia', // 'desat-sepia' | 'none'
       desatAmount:    0.35,
       sepiaAmount:    0.20,
       contrastBoost:  1.05,
     },
 
-    // Worker session
     sessionMaxMs:     2.9 * 60 * 60 * 1000,
     protocolTimeout:  120_000,
 
-    // Camera step
     cameraMoveStep:   0.5,
-
-    // Hash
-    hashLength:       8,      // SHA-256 prefix length in filename
+    hashLength:       8,
   },
 
-  // ─── RENDER pipeline ────────────────────────────────────────────────
+
   RENDER: {
-    // Worker pool
-    blankSizeKb:        30,     // PNG size threshold (KB)
+    blankSizeKb:        30,
     protocolTimeoutMs:  120_000,
-    sessionMaxMs:       10 * 60 * 1000,  // min per worker session
+    sessionMaxMs:       10 * 60 * 1000,
     maxRetry:           2,
-
-    // Sample grid for analyzeCanvas (WebGL readPixels)
-    sampleGridSize:     20,     // 20×20 = 400 samples
-    edgeGradThr:        30,     // gradient threshold per channel (0-255)
-
-    // Stable frame detection (Cesium postRender)
+    sampleGridSize:     20,
+    edgeGradThr:        30,
     requiredStableFrames: 5,
     postRenderExtraFrames: 4,
     postRenderBufferMs:  30,
-
-    // Cesium viewer
     targetFrameRate:    20,
     lightDirection:     { x: 0.5, y: -0.5, z: -0.7 },
   },
 
-  // ─── STITCH defaults ────────────────────────────────────────────────
+
   STITCH: {
-    // Default colors
     background:         { r: 255, g: 255, b: 255, alpha: 1 },
     seamColor:          { r: 255, g:   0, b:   0, alpha: 1 },
     seamThicknessPx:    1,
     pairGapColor:       { r: 240, g: 240, b: 240, alpha: 1 },
-
-    // CLI defaults
     debugOnly:          true,
     xaxisAuto:          'auto',  // 'auto' | 'east' | 'west' | 'off'
     flipXByDefault:     null,    // null = auto-detect, 'east'/'west' = force
 
-    // Output path template
     outPathTemplate:    'stitch_{N}x{M}_offset{startQx}_{startQy}_{suffix}.png',
   },
-
-  // ─── XAXIS sign detection ───────────────────────────────────────────
   XAXIS: {
-    overlap:            512,    // overlap px (= sizePx * (1 - cameraMoveStep))
+    overlap:            512,
     sampleHeight:       1024,
-    resizeWidth:        128, 
-    ratioThreshold:     1.2,    // ratio > 1.2 = east, < 1/1.2 = west
-    highConfRatio:      2.0,    // ratio > N = high confidence
-    mediumConfRatio:    1.5,    // ratio > N = medium confidence
+    resizeWidth:        128,
+    ratioThreshold:     1.2,
+    highConfRatio:      2.0,
+    mediumConfRatio:    1.5,
   },
-
-  // ─── WORKERS ────────────────────────────────────────────────────────
   WORKERS: {
     default: 1,
     max:     4,
   },
 
-  // ─── PROVIDERS (tile data source plugins) ──────────────────────────────
+
   PROVIDERS: {
     available: ['google', 'cesium-ion'],
     default:   'cesium-ion',
 
-    // Cesium Ion specifics
+
     cesiumIon: {
-      // Google Photorealistic 3D Tiles on Cesium Ion
+
       googleAssetId:     2275207,
       validateUrl:      'https://api.cesium.com/v1/me',
       requestTimeoutMs: 10_000,
     },
   },
 
-  // ─── GOOGLE API (legacy — change PROVIDERS plugin) ──────────────
+
   GOOGLE: {
     rootJsonUrl:        'https://tile.googleapis.com/v1/3dtiles/root.json',
     requestTimeoutMs:   10_000,
   },
 
-  // ─── TMP (worker profile + html paths) ─────────────────────────────
+
   TMP: {
     dirName:           'isometric-style-convert',
     htmlPrefix:        'tmp_cesium_w',
     profilePrefix:     'chrome_profile_w',
   },
 
-  // ─── CHECKPOINT ────────────────────────────────────────────────────
+
   CHECKPOINT: {
     schemaVersion:     1,
     flushIntervalMs:   5000,
   },
 
-  // ─── QUALITY thresholds (for getThresholds helper) ─────────────────
+
   QUALITY: {
     useTileDefaults:    true,
   },
 
-  // ─── GEO constants ─────────────────────────────────────────────────
+
   GEO: {
-    mPerDegLat:        111111,  // meters per 1° latitude (constant)
+    mPerDegLat:        111111,
   },
 
-  // ─── CESIUM ────────────────────────────────────────────────────────
+
   CESIUM: {
     version:           '1.132',
-    // UI elements
+
     hiddenUi:          [
       'cesium-viewer-toolbar',
       'cesium-viewer-animationContainer',
@@ -197,15 +190,15 @@ const DEFAULTS = {
     showCreditsOnScreen: false,
   },
 
-  // ─── SEEDS registry (location points) ──────────────────────────────
+
   SEEDS: {
     sgn: { lat: 10.78465, lng: 106.70775, label: 'Saigon, District 1' },
     nyc: { lat: 40.7128,  lng: -74.0060,  label: 'New York City' },
-    // Add more locations here
+
   },
 };
 
-// ─── Env override helper ────────────────────────────────────────────────
+
 
 function applyEnvOverrides(config, projectRoot) {
   for (const section of Object.keys(config)) {
@@ -236,17 +229,10 @@ function applyEnvOverrides(config, projectRoot) {
 
 }
 
-// ─── Singleton export ──────────────────────────────────────────────────
-
-// Project root = parent of src/
 const PROJECT_ROOT_DEFAULT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
-
-/**
- * Public project root
- */
 export const PROJECT_ROOT = PROJECT_ROOT_DEFAULT;
 
-// Lazy: build config
+
 let _config = null;
 export function getConfig(projectRoot = PROJECT_ROOT_DEFAULT) {
   if (_config) return _config;
@@ -257,7 +243,7 @@ export function getConfig(projectRoot = PROJECT_ROOT_DEFAULT) {
 
 const _cfg = getConfig();
 
-// ─── Legacy flat exports (backward compat) ─────────────────────────────
+
 
 export const PATHS = _cfg.PATHS;
 export const GRID = _cfg.GRID;
@@ -268,7 +254,6 @@ export const XAXIS = _cfg.XAXIS;
 export const WORKERS = _cfg.WORKERS;
 export const GOOGLE = _cfg.GOOGLE;
 export const PROVIDERS = _cfg.PROVIDERS;
-export const BILLING = _cfg.BILLING;
 export const TMP = _cfg.TMP;
 export const CHECKPOINT = _cfg.CHECKPOINT;
 export const QUALITY = _cfg.QUALITY;
@@ -276,30 +261,15 @@ export const GEO = _cfg.GEO;
 export const CESIUM = _cfg.CESIUM;
 export const SEEDS = _cfg.SEEDS;
 export const FALLBACK = _cfg.TILE?.fallback ?? { enabled: false };
-export const DEFAULTS_ALL = DEFAULTS;
 
-// ─── Derived constants (backward compat) ──────────────────────────────
-
-export const CELL_SIZE_M     = 200;                            // 200m world / 1 tile
-export const QUADRANT_M      = 100;                            // 100m
-
-// Size 1 tile
-export const TILE_SIZE_M     = CELL_SIZE_M;                    // 200m world / 1 tile
-export const TILE_SIZE_PX    = TILE.sizePx;                    // 1024px
-
-// Frustum width
-export const FRUSTUM_W       = TILE_SIZE_M;                    // 200m
-
-// Camera move (= 0.5 * 200m = 100m)
+// Derived constants
+export const CELL_SIZE_M     = 200;
+export const QUADRANT_M      = 100;
+export const TILE_SIZE_M     = CELL_SIZE_M;
+export const TILE_SIZE_PX    = TILE.sizePx;
 export const TILE_STEP_M     = TILE_SIZE_M * TILE.cameraMoveStep;
-
-// Camera move pixel (= 0.5 * 1024 = 512px)
 export const TILE_STEP_PX    = TILE_SIZE_PX * TILE.cameraMoveStep;
-
-// Meters per pixel
-export const M_PER_PX        = TILE_SIZE_M / TILE_SIZE_PX;     // ~0.195 m/px
-
-// ─── Helpers ──────────────────────────────────────────────────────────
+export const M_PER_PX        = TILE_SIZE_M / TILE_SIZE_PX;
 
 export function resolvePath(key) {
   const v = PATHS[key];
@@ -308,23 +278,6 @@ export function resolvePath(key) {
   }
   return path.isAbsolute(v) ? v : path.resolve(PROJECT_ROOT_DEFAULT, v);
 }
-
-export function getSeeds() {
-  return { ...SEEDS };
-}
-
-export function addSeed(key, { lat, lng, label }) {
-  SEEDS[key] = { lat, lng, label };
-}
-
-// ─── Google API Keys ───────────────────────────────────────────────────
-
-export function getGoogleKeys() {
-  const env = process.env.GOOGLE_KEY ?? '';
-  return env.split(',').map(k => k.trim()).filter(Boolean);
-}
-
-// ─── CLI argument parser (backward compat) ────────────────────────────
 
 export function parseArgs(argv = process.argv) {
   return Object.fromEntries(

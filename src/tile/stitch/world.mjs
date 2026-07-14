@@ -1,10 +1,11 @@
 /**
- * tile/stitch/world.mjs — Stitch tile theo world coords (không cần grid vuông)
+ * tile/stitch/world.mjs — Stitch tiles by world coords (no square grid required).
  *
- * stitchWorld: ghép tile thưa thớt (lat, lng) → 1 ảnh lớn đúng vị trí thế giới.
- * Khác stitchGrid: tile có thể rải rác, vị trí pixel tính từ lat/lng.
+ * stitchWorld: combine sparse tiles (lat, lng) into one large image at the
+ * correct world position. Unlike stitchGrid, tiles can be scattered; each
+ * tile's pixel position is computed from its lat/lng.
  *
- * Với cameraMoveStep=1.0, 1 tile = 200m×200m world, 1px = 200m/1024.
+ * With cameraMoveStep=1.0, 1 tile = 200m × 200m world, 1px = 200m/1024.
  */
 
 import sharp from 'sharp';
@@ -14,13 +15,13 @@ import { savePng } from './io.mjs';
 const DEFAULT_BG = STITCH.background;
 
 /**
- * Stitch tile thưa thớt theo world coords (lat, lng).
+ * Stitch sparse tiles by world coordinates (lat, lng).
  *
  * @param {Object} opts
  * @param {Array<{lat: number, lng: number, png: Buffer|string|sharp.Sharp}>} opts.tiles
  * @param {string} opts.outPath
  * @param {{r,g,b,alpha}} [opts.background]
- * @param {number} [opts.padding=100] - Padding px xung quanh map
+ * @param {number} [opts.padding=100] - Padding px around the map
  * @returns {Promise<{outPath, size, mapW, mapH, placements}>}
  */
 export async function stitchWorld({ tiles, outPath, background, padding = 100 }) {
@@ -30,11 +31,11 @@ export async function stitchWorld({ tiles, outPath, background, padding = 100 })
 
   const bg = background ?? DEFAULT_BG;
   const _px = TILE.sizePx;                            // 1024
-  const _m  = 200;                                    // world width mỗi tile (giống CELL_SIZE_M)
+  const _m  = 200;                                    // world width per tile (matches CELL_SIZE_M)
   const PX_PER_M = _px / _m;                          // 5.12 px/m
   const mPerDegLat = GEO.mPerDegLat;                  // 111111
 
-  // 1. Tính bounding box world
+  // 1. Compute world bounding box
   let minLat = Infinity, maxLat = -Infinity;
   let minLng = Infinity, maxLng = -Infinity;
   for (const t of tiles) {
@@ -50,7 +51,7 @@ export async function stitchWorld({ tiles, outPath, background, padding = 100 })
   const mapW = Math.ceil(widthM * PX_PER_M) + 2 * padding;
   const mapH = Math.ceil(heightM * PX_PER_M) + 2 * padding;
 
-  // 2. Tile → pixel offset (Y đảo vì screen Y hướng xuống, world North lên trên)
+  // 2. Tile → pixel offset (Y is inverted: screen Y points down, world North points up)
   const placements = [];
   const composites = [];
   for (const t of tiles) {
@@ -60,7 +61,7 @@ export async function stitchWorld({ tiles, outPath, background, padding = 100 })
     composites.push({ input: t.png, left: dx, top: dy });
   }
 
-  // 3. Tạo base canvas
+  // 3. Build base canvas
   const baseBuf = Buffer.alloc(mapW * mapH * 4);
   for (let i = 0; i < baseBuf.length; i += 4) {
     baseBuf[i + 0] = bg.r;

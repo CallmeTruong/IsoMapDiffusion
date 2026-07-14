@@ -1,9 +1,8 @@
 export { makeCesiumHTML, CESIUM_VERSION } from './html.mjs';
 export {
-  qxyToLatLng, quadrantRCToLatLng, tileQxQyToLatLng, tileIndexToLatLng,
+  qxyToLatLng, quadrantRCToLatLng, tileIndexToLatLng,
   latLngToQxy, M_PER_DEG_LAT,
 } from './coords.mjs';
-export { initDB, runDB, insertOrIgnoreQuadrant, updateQuadrantAttempt, getDB } from './db.mjs';
 export {
   computeSeedPoint,
   cellsToQuadrants,
@@ -25,7 +24,6 @@ export {
 export { runWorker } from './worker.mjs';
 export { loadCheckpoint, saveCheckpoint, CheckpointTracker } from './checkpoint.mjs';
 export {
-  // Tile I/O — canonical format helpers
   signInt,
   TILE_FILE_RE,
   TILE_META_RE,
@@ -38,7 +36,6 @@ export {
   saveTile,
   findTile,
   deleteTileFiles,
-  markTileDeleted as markTileDeleted2,
   clearTileDeletedMarker,
   deleteTileWithMarker,
   listTiles,
@@ -59,3 +56,4 @@ export {
   stitchGrid,
   stitchWorld,
 } from './stitch.mjs';
+export { isPlaceholderPng, isPlaceholderFromSamples } from './placeholder_detect.mjs';

@@ -1,7 +1,3 @@
-/**
- * cli/index.mjs — Re-export facade
- */
-
 export { parseCliArgs, showHelp } from './args.mjs';
 export { getSeed } from './seed.mjs';
 export { cmdRender, cmdTest, runRender } from './render.mjs';
