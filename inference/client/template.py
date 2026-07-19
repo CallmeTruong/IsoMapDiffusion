@@ -742,6 +742,9 @@ class TemplateBuilder:
         end_qy = (template_world_bottom - 1) // QUADRANT_SIZE
 
         infill_quadrants = set(effective_region.overlapping_quadrants())
+        if not any(self.get_render(qx, qy) is not None for (qx, qy) in infill_quadrants):
+            self._last_validation_error = "No 3D render available for infill region"
+            return None
 
         # Step 5: For every quadrant inside the template window, decide
         # whether it is part of the infill (use render / 3D output) or

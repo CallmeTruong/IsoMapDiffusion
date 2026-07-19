@@ -639,10 +639,13 @@ async def run(args: argparse.Namespace) -> None:
                 done_quadrants,
             )
             if template is None:
-                log.warning("[step %s %s] no valid placement: %s",
+                log.warning("[step %s %s] skipping (no 3D render): %s",
                             step.step_type,
                             [(q.x, q.y) for q in step.quadrants],
                             summary)
+                traversal.mark_done([(q.x, q.y) for q in step.quadrants])
+                done_quadrants.update((q.x, q.y) for q in step.quadrants)
+                state["done_quadrants"].update({f"{q.x},{q.y}": True for q in step.quadrants})
                 failed_steps += 1
                 continue
 
