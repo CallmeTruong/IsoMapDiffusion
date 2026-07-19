@@ -122,15 +122,7 @@ def sign_int(n: int) -> str:
 def discover_tiles(renders_dir: Path) -> list[tuple[int, int]]:
     """Parse tile coords tu `tile_<qx>_<qy>_<hash>.png` filenames."""
     tiles: set[tuple[int, int]] = set()
-    for f in renders_dir.glob("tile_+*_+*_*.png"):
-        m = TILE_RE.match(f.name)
-        if not m:
-            continue
-        try:
-            tiles.add((int(m.group(1)), int(m.group(2))))
-        except ValueError:
-            continue
-    for f in renders_dir.glob("tile_-*_+*_*.png"):
+    for f in renders_dir.glob("tile_*_*_*.png"):
         m = TILE_RE.match(f.name)
         if not m:
             continue
