@@ -234,7 +234,9 @@ class QwenEditPipeline:
         #     with batch_size >= 2 (so batched batches benefit from the
         #     optimized kernels). Set ENABLE_TORCH_COMPILE_OPT=max-autotune.
         # ------------------------------------------------------------------
-        if _opt_enabled("TORCH_COMPILE"):
+        torch_compile_raw = os.environ.get("ENABLE_TORCH_COMPILE_OPT", "1").strip().lower()
+        torch_compile_enabled = torch_compile_raw not in ("0", "false", "no", "off")
+        if torch_compile_enabled:
             try:
                 if (
                     hasattr(self.pipe, "transformer")

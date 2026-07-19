@@ -165,12 +165,8 @@ class TileTraversal:
             self._step_index += 1
 
             # Skip steps whose quadrants are all already generated.
-            generated_set = self.quadrant_state.all_generated()
-            if all(q in generated_set for q in step.quadrants):
-                # Treat as done for plan advancement.
-                self.quadrant_state.mark_generated(
-                    [(q.x, q.y) for q in step.quadrants]
-                )
+            if all(self.quadrant_state.is_generated(q.x, q.y)
+                   for q in step.quadrants):
                 continue
 
             # Detect a degenerate infinite loop (plan keeps emitting the
@@ -190,11 +186,13 @@ class TileTraversal:
             return step
 
     def mark_done(self, quadrants: Iterable[tuple[int, int]]) -> None:
-        """Danh dau N quadrants vua gen xong (step 2x2/2x1/1x2/1x1)."""
+        """Danh dau N quadrants vua gen xong (step 2x2/2x1/1x2/1x1).
+
+        Does NOT rebuild plan — get_next_step() handles rebuild when
+        the current plan's steps are exhausted. Avoids O(N^2) cost of
+        rebuilding after every single step for large maps.
+        """
         self.quadrant_state.mark_generated(quadrants)
-        # Rebuild plan de buoc tiep theo tinh chinh xac
-        self._current_plan = self._build_plan()
-        self._step_index = 0
 
     def is_complete(self) -> bool:
         """True neu tat ca quadrant trong bounds da generated."""

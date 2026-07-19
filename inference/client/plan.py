@@ -27,6 +27,7 @@ Khi nao gen 1x1 (1 quadrant / request):
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -270,29 +271,27 @@ def place_2x2_tiles(
     steps: list[GenerationStep] = []
     scheduled: set[Point] = set()
 
-    # First pass
-    while True:
-        valid = _find_valid_2x2_positions(
-            bounds, effective_generated, scheduled, allow_adjacent_scheduled=False
-        )
-        if not valid:
-            break
-        tl = valid[0]
-        quadrants = get_2x2_quadrants(tl)
-        steps.append(GenerationStep(quadrants=quadrants, step_type="2x2"))
-        scheduled.update(quadrants)
+    # Pass 1: strict (no adjacent scheduled neighbors)
+    # Optimized: single forward scan. Scheduling only adds constraints,
+    # so a greedy scan is equivalent to the iterative rescan approach.
+    for y in range(bounds.top_left.y, bounds.bottom_right.y):
+        for x in range(bounds.top_left.x, bounds.bottom_right.x):
+            tl = Point(x, y)
+            if can_place_2x2(tl, bounds, effective_generated, scheduled,
+                             allow_adjacent_scheduled=False):
+                quadrants = get_2x2_quadrants(tl)
+                steps.append(GenerationStep(quadrants=quadrants, step_type="2x2"))
+                scheduled.update(quadrants)
 
-    # Second pass
-    while True:
-        valid = _find_valid_2x2_positions(
-            bounds, effective_generated, scheduled, allow_adjacent_scheduled=True
-        )
-        if not valid:
-            break
-        tl = valid[0]
-        quadrants = get_2x2_quadrants(tl)
-        steps.append(GenerationStep(quadrants=quadrants, step_type="2x2"))
-        scheduled.update(quadrants)
+    # Pass 2: relaxed (allow adjacent scheduled)
+    for y in range(bounds.top_left.y, bounds.bottom_right.y):
+        for x in range(bounds.top_left.x, bounds.bottom_right.x):
+            tl = Point(x, y)
+            if can_place_2x2(tl, bounds, effective_generated, scheduled,
+                             allow_adjacent_scheduled=True):
+                quadrants = get_2x2_quadrants(tl)
+                steps.append(GenerationStep(quadrants=quadrants, step_type="2x2"))
+                scheduled.update(quadrants)
 
     return steps, scheduled
 
@@ -422,19 +421,43 @@ def place_2x1_tiles(
     steps: list[GenerationStep] = []
     new_scheduled = set(scheduled)
 
-    while True:
-        valid = _find_valid_2x1_positions(bounds, effective_generated, new_scheduled)
-        if not valid:
-            break
+    # Optimized: batch scan-and-place per pass (place ALL valid in one scan)
+    # instead of find-one-rescan. Multiple passes needed because scheduling
+    # CAN enable new placements (new scheduled quads become long-side context).
+    # Typically converges in 2-3 passes.
+    changed = True
+    while changed:
+        changed = False
+        combined = effective_generated | new_scheduled
 
-        pos, tile_type = valid[0]
-        if tile_type == "2x1":
-            quadrants = [pos, Point(pos.x + 1, pos.y)]
-        else:  # "1x2"
-            quadrants = [pos, Point(pos.x, pos.y + 1)]
+        # 1x2 vertical first (bridges between 2x2 tiles — higher priority)
+        for y in range(bounds.top_left.y, bounds.bottom_right.y):
+            for x in range(bounds.top_left.x, bounds.bottom_right.x + 1):
+                top = Point(x, y)
+                bottom = Point(x, y + 1)
+                # Quick reject before expensive can_place check
+                if top in combined or bottom in combined:
+                    continue
+                if can_place_1x2_vertical(top, bounds, effective_generated, new_scheduled):
+                    quadrants = [top, bottom]
+                    steps.append(GenerationStep(quadrants=quadrants, step_type="1x2"))
+                    new_scheduled.update(quadrants)
+                    combined.update(quadrants)
+                    changed = True
 
-        steps.append(GenerationStep(quadrants=quadrants, step_type=tile_type))
-        new_scheduled.update(quadrants)
+        # 2x1 horizontal second
+        for y in range(bounds.top_left.y, bounds.bottom_right.y + 1):
+            for x in range(bounds.top_left.x, bounds.bottom_right.x):
+                left = Point(x, y)
+                right = Point(x + 1, y)
+                if left in combined or right in combined:
+                    continue
+                if can_place_2x1_horizontal(left, bounds, effective_generated, new_scheduled):
+                    quadrants = [left, right]
+                    steps.append(GenerationStep(quadrants=quadrants, step_type="2x1"))
+                    new_scheduled.update(quadrants)
+                    combined.update(quadrants)
+                    changed = True
 
     return steps, new_scheduled
 
@@ -500,33 +523,32 @@ def place_1x1_tiles(
 ) -> list[GenerationStep]:
     """Fill gap con lai bang 1x1 (chi khi co context 2x2 day du)."""
     steps: list[GenerationStep] = []
-    combined = effective_generated | scheduled
-    new_scheduled = set(scheduled)
+    # Mutable working set — grows as we place tiles.
+    # Avoids repeated set union (combined | new_scheduled) per check.
+    combined = set(effective_generated) | set(scheduled)
 
-    remaining = [p for p in bounds.all_points() if p not in combined]
-
-    # Sort theo priority: nhieu generated neighbors hon = uu tien hon
-    def priority(p: Point) -> int:
-        blocks = get_2x2_block_positions(p)
-        max_generated = max(
-            _count_in_block(block, combined | new_scheduled) for block in blocks
-        )
-        return -max_generated  # negative for descending sort
-
-    remaining.sort(key=priority)
+    remaining = set(p for p in bounds.all_points() if p not in combined)
 
     changed = True
     while changed:
         changed = False
-        for p in list(remaining):
-            if p in new_scheduled:
-                remaining.remove(p)
+        # Re-sort each pass (priorities shift as tiles are placed)
+        sorted_remaining = sorted(remaining, key=lambda p: -max(
+            _count_in_block(block, combined)
+            for block in get_2x2_block_positions(p)
+        ))
+
+        placed = []
+        for p in sorted_remaining:
+            if p in combined:
                 continue
-            if can_place_1x1(p, combined | new_scheduled):
+            if can_place_1x1(p, combined):
                 steps.append(GenerationStep(quadrants=[p], step_type="1x1"))
-                new_scheduled.add(p)
-                remaining.remove(p)
+                combined.add(p)
+                placed.append(p)
                 changed = True
+
+        remaining -= set(placed)
 
     return steps
 
@@ -550,6 +572,8 @@ def create_rectangle_plan(
         queued: Set dang gen (in-progress) - duoc treat nhu "se generated" cho
                 seam detection.
     """
+    import time as _time
+
     generated = generated or set()
     queued = queued or set()
     effective_generated = generated | queued
@@ -558,12 +582,27 @@ def create_rectangle_plan(
     if not points_to_generate:
         return RectanglePlan(bounds=bounds, steps=[], pre_generated=generated)
 
+    total = len(points_to_generate)
+    print(f"Building plan for {total} quadrants (bounds {bounds.width}x{bounds.height})...")
+    t0 = _time.monotonic()
+
     # Phase 1: 2x2 tiles (full tile, 4 quads / request)
     steps_2x2, scheduled = place_2x2_tiles(bounds, effective_generated)
+    t1 = _time.monotonic()
+    print(f"  Phase 1 (2x2): {len(steps_2x2)} steps ({t1-t0:.2f}s)")
+
     # Phase 2: 2x1/1x2 bridges (2 quads / request)
     steps_2x1, scheduled = place_2x1_tiles(bounds, effective_generated, scheduled)
+    t2 = _time.monotonic()
+    print(f"  Phase 2 (2x1/1x2): {len(steps_2x1)} steps ({t2-t1:.2f}s)")
+
     # Phase 3: 1x1 fills (1 quad / request)
     steps_1x1 = place_1x1_tiles(bounds, effective_generated, scheduled)
+    t3 = _time.monotonic()
+    print(f"  Phase 3 (1x1): {len(steps_1x1)} steps ({t3-t2:.2f}s)")
+
+    total_steps = len(steps_2x2) + len(steps_2x1) + len(steps_1x1)
+    print(f"  Plan complete: {total_steps} steps total ({t3-t0:.2f}s)")
 
     return RectanglePlan(
         bounds=bounds,
