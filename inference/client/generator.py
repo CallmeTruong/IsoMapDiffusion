@@ -125,11 +125,21 @@ class GenerationClient:
         if seed is not None:
             payload["seed"] = seed
 
-        # Call API using pooled connection
+        # Call API using pooled connection with auto-retry for SSH tunnel drops
         client = await self._get_client()
-        response = await client.post(f"{self.base_url}/edit", json=payload)
-        response.raise_for_status()
-        result = response.json()
+        last_exc = None
+        for attempt in range(1, 6):
+            try:
+                response = await client.post(f"{self.base_url}/edit", json=payload)
+                response.raise_for_status()
+                result = response.json()
+                break
+            except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                last_exc = e
+                if attempt < 5:
+                    await asyncio.sleep(2.0 * attempt)
+                else:
+                    raise last_exc
 
         # Decode result
         result_b64 = result["image_b64"]
