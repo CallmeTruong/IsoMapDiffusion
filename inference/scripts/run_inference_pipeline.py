@@ -646,7 +646,7 @@ async def run(args: argparse.Namespace) -> None:
                 failed_steps += 1
                 continue
 
-            edit_result = await client.edit(template, args.prompt)
+            edit_result = await client.edit(template, args.prompt, steps=args.steps)
             result_img = edit_result.image
             crops = crop_quadrants_from_output(result_img, step, placement)
 
@@ -774,6 +774,8 @@ def parse_args() -> argparse.Namespace:
                    help="Inference server URL -- default: from INFERENCE_ENDPOINT env var.")
     p.add_argument("--prompt", type=str, default=None,
                    help="Edit prompt -- default: from src.constants.DEFAULT_PROMPT.")
+    p.add_argument("--steps", type=int, default=None,
+                   help="Inference steps (default: from INFERENCE_STEPS env var or 14).")
     p.add_argument("--concurrency", type=int, default=4,
                    help="Max in-flight requests (default=4). Note: plan-based generation is sequential; this is for connection pooling.")
     p.add_argument("--tile-size", type=int, default=1024,
