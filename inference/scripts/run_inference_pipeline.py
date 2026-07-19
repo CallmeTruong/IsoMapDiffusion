@@ -535,11 +535,20 @@ async def run(args: argparse.Namespace) -> None:
     log.info("endpoint : %s", args.endpoint)
 
     tiles = discover_tiles(renders_dir)
+    if args.min_qx is not None:
+        tiles = [t for t in tiles if t[0] >= args.min_qx]
+    if args.max_qx is not None:
+        tiles = [t for t in tiles if t[0] <= args.max_qx]
+    if args.min_qy is not None:
+        tiles = [t for t in tiles if t[1] >= args.min_qy]
+    if args.max_qy is not None:
+        tiles = [t for t in tiles if t[1] <= args.max_qy]
+
     if not tiles:
-        log.error("No tiles found in %s", renders_dir)
+        log.error("No tiles found in %s for coordinate range", renders_dir)
         return
     total_quads = len(tiles) * 4
-    log.info("Discovered %d tiles (= %d quadrants).", len(tiles), total_quads)
+    log.info("Discovered %d tiles (= %d quadrants) for coordinate range.", len(tiles), total_quads)
 
     # Load state
     state = load_state(state_path) if args.resume else {"version": STATE_VERSION, "done_quadrants": {}}
@@ -779,6 +788,14 @@ def parse_args() -> argparse.Namespace:
                    help="Edit prompt -- default: from src.constants.DEFAULT_PROMPT.")
     p.add_argument("--steps", type=int, default=None,
                    help="Inference steps (default: from INFERENCE_STEPS env var or 14).")
+    p.add_argument("--min-qx", type=int, default=None,
+                   help="Filter tiles: minimum qx coordinate (inclusive).")
+    p.add_argument("--max-qx", type=int, default=None,
+                   help="Filter tiles: maximum qx coordinate (inclusive).")
+    p.add_argument("--min-qy", type=int, default=None,
+                   help="Filter tiles: minimum qy coordinate (inclusive).")
+    p.add_argument("--max-qy", type=int, default=None,
+                   help="Filter tiles: maximum qy coordinate (inclusive).")
     p.add_argument("--concurrency", type=int, default=4,
                    help="Max in-flight requests (default=4). Note: plan-based generation is sequential; this is for connection pooling.")
     p.add_argument("--tile-size", type=int, default=1024,
