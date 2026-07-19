@@ -60,8 +60,9 @@ def compute_bounds(tiles: dict):
 
 def stitch_all(gen_dir: Path, output_path: Path,
                stride: int = DEFAULT_STRIDE,
+               scale: float = 0.5,
                background: tuple = DEFAULT_BACKGROUND) -> dict:
-    """Stitch t?t c? tile trong `gen_dir` -> `output_path`. Tr? v? stats dict."""
+    """Stitch tat ca tile trong `gen_dir` -> `output_path`. Tra ve stats dict."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -73,34 +74,44 @@ def stitch_all(gen_dir: Path, output_path: Path,
     min_qx, max_qx, min_qy, max_qy = compute_bounds(tiles)
     log.info(f"Found {len(tiles)} tiles, qx in [{min_qx},{max_qx}] qy in [{min_qy},{max_qy}]")
 
-    width_px = (max_qx - min_qx + 1) * stride + (TILE_SIZE - stride)
-    height_px = (max_qy - min_qy + 1) * stride + (TILE_SIZE - stride)
-    log.info(f"Output: {width_px}x{height_px}")
+    full_w = (max_qx - min_qx + 1) * stride + (TILE_SIZE - stride)
+    full_h = (max_qy - min_qy + 1) * stride + (TILE_SIZE - stride)
+
+    # Auto-adjust scale if canvas would exceed 1.5 GB memory
+    est_mem_gb = (full_w * scale) * (full_h * scale) * 4 * 4 / (1024**3)
+    if est_mem_gb > 1.5 and scale > 0.1:
+        auto_scale = round(scale * (1.5 / est_mem_gb) ** 0.5, 2)
+        auto_scale = max(0.1, auto_scale)
+        log.warning(f"Full resolution ({full_w}x{full_h}) requires {est_mem_gb:.1f} GB RAM. Auto-adjusting --scale from {scale} to {auto_scale}.")
+        scale = auto_scale
+
+    tile_size_s = max(1, int(TILE_SIZE * scale))
+    stride_s = max(1, int(stride * scale))
+    width_px = (max_qx - min_qx + 1) * stride_s + (tile_size_s - stride_s)
+    height_px = (max_qy - min_qy + 1) * stride_s + (tile_size_s - stride_s)
+
+    log.info(f"Output preview size: {width_px}x{height_px} (scale={scale:.2f})")
 
     canvas = np.full((height_px, width_px, 3), background, dtype=np.float32)
     weight = np.zeros((height_px, width_px), dtype=np.float32)
 
+    tile_weight = np.ones((tile_size_s, tile_size_s), dtype=np.float32)
+    edge = max(1, int(scale))
+    tile_weight[:edge] *= np.linspace(0.5, 1.0, edge).reshape(-1, 1)
+    tile_weight[-edge:] *= np.linspace(1.0, 0.5, edge).reshape(-1, 1)
+    tile_weight[:, :edge] *= np.linspace(0.5, 1.0, edge).reshape(1, -1)
+    tile_weight[:, -edge:] *= np.linspace(1.0, 0.5, edge).reshape(1, -1)
+
     for (qx, qy), path in sorted(tiles.items()):
-        img = np.asarray(Image.open(path).convert("RGB"), dtype=np.float32)
-        if img.shape[:2] != (TILE_SIZE, TILE_SIZE):
-            log.warning(f"Tile ({qx},{qy}) has shape {img.shape[:2]}, resize.")
-            img = np.asarray(
-                Image.fromarray(img.astype(np.uint8)).resize(
-                    (TILE_SIZE, TILE_SIZE), Image.Resampling.LANCZOS),
-                dtype=np.float32,
-            )
+        img_pil = Image.open(path).convert("RGB")
+        if scale != 1.0 or img_pil.size != (TILE_SIZE, TILE_SIZE):
+            img_pil = img_pil.resize((tile_size_s, tile_size_s), Image.Resampling.BILINEAR)
+        img = np.asarray(img_pil, dtype=np.float32)
 
-        x0 = (qx - min_qx) * stride
-        y0 = (qy - min_qy) * stride
-        x1 = x0 + TILE_SIZE
-        y1 = y0 + TILE_SIZE
-
-        tile_weight = np.ones((TILE_SIZE, TILE_SIZE), dtype=np.float32)
-        edge = 1
-        tile_weight[:edge] *= np.linspace(0.5, 1.0, edge).reshape(-1, 1)
-        tile_weight[-edge:] *= np.linspace(1.0, 0.5, edge).reshape(-1, 1)
-        tile_weight[:, :edge] *= np.linspace(0.5, 1.0, edge).reshape(1, -1)
-        tile_weight[:, -edge:] *= np.linspace(1.0, 0.5, edge).reshape(1, -1)
+        x0 = (qx - min_qx) * stride_s
+        y0 = (qy - min_qy) * stride_s
+        x1 = x0 + tile_size_s
+        y1 = y0 + tile_size_s
 
         for c in range(3):
             canvas[y0:y1, x0:x1, c] += img[:, :, c] * tile_weight
@@ -130,11 +141,13 @@ def stitch_all(gen_dir: Path, output_path: Path,
 def main():
     parser = argparse.ArgumentParser(description="Stitch generated tiles into a map")
     parser.add_argument("--input", type=str, required=True,
-                        help="Gen dir ch?a tile_*_*_*.png")
+                        help="Gen dir chua tile_*_*_*.png")
     parser.add_argument("--output", type=str, required=True,
                         help="Output PNG path")
     parser.add_argument("--stride", type=int, default=DEFAULT_STRIDE,
-                        help=f"Pixel stride gi?a 2 tile -- default: {DEFAULT_STRIDE}")
+                        help=f"Pixel stride giua 2 tile -- default: {DEFAULT_STRIDE}")
+    parser.add_argument("--scale", type=float, default=0.5,
+                        help="Scale factor for preview output (default: 0.5 for lower RAM footprint)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -146,6 +159,7 @@ def main():
         gen_dir=Path(args.input),
         output_path=Path(args.output),
         stride=args.stride,
+        scale=args.scale,
     )
     log.info(f"Done in {time.monotonic()-t0:.1f}s ? {stats}")
 
