@@ -103,7 +103,23 @@ def stitch_all(gen_dir: Path, output_path: Path,
     tile_weight[:, -edge:] *= np.linspace(1.0, 0.5, edge).reshape(1, -1)
 
     for (qx, qy), path in sorted(tiles.items()):
-        img_pil = Image.open(path).convert("RGB")
+        # Handle concurrent tile updates where pipeline renames old tile hash
+        img_pil = None
+        target_path = path
+        if not target_path.exists():
+            matches = list(gen_dir.glob(f"tile_{sign_int(qx)}_{sign_int(qy)}_*.png"))
+            if matches:
+                target_path = matches[0]
+
+        if target_path.exists():
+            try:
+                img_pil = Image.open(target_path).convert("RGB")
+            except Exception:
+                img_pil = None
+
+        if img_pil is None:
+            continue
+
         if scale != 1.0 or img_pil.size != (TILE_SIZE, TILE_SIZE):
             img_pil = img_pil.resize((tile_size_s, tile_size_s), Image.Resampling.BILINEAR)
         img = np.asarray(img_pil, dtype=np.float32)
