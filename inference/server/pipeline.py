@@ -422,16 +422,19 @@ class QwenEditPipeline:
             f"seeds={seed_list}"
         )
 
+        true_cfg_arg = true_cfg_list[0] if len(set(true_cfg_list)) == 1 else true_cfg_list
+        guidance_arg = guidance_list[0] if len(set(guidance_list)) == 1 else guidance_list
+
         t0 = time.perf_counter()
         try:
             with torch.inference_mode():
                 output = self.pipe(
                     prompt=prompts_list,
                     negative_prompt=neg_list,
-                    true_cfg_scale=true_cfg_list,
+                    true_cfg_scale=true_cfg_arg,
                     image=images_list,
                     num_inference_steps=steps,
-                    guidance_scale=guidance_list,
+                    guidance_scale=guidance_arg,
                     generator=generators,
                 )
         except TypeError as e:
@@ -446,7 +449,7 @@ class QwenEditPipeline:
                     negative_prompt=neg_list,
                     image=images_list,
                     num_inference_steps=steps,
-                    guidance_scale=guidance_list,
+                    guidance_scale=guidance_arg,
                     generator=generators,
                 )
 

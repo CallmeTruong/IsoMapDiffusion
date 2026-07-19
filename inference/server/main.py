@@ -177,6 +177,9 @@ async def edit_image(req: EditRequest) -> EditResponse:
         )
 
     except Exception as e:
+        import traceback
+        print(f"ERROR in /edit: {e}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
