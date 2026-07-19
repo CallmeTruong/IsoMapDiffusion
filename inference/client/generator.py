@@ -1,5 +1,6 @@
 """Generation client for calling inference server."""
 
+import asyncio
 import base64
 from dataclasses import dataclass
 from io import BytesIO
