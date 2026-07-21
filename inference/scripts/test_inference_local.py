@@ -300,13 +300,20 @@ async def test_full_flow_mock(test_renders: Path, test_gen: Path) -> dict:
 
         # Stitch tung quadrant vao tile
         for (qx, qy), quad_img in crops.items():
-            tile_qx = qx // 2
-            tile_qy = qy // 2
-            quad_ox = qx % 2
-            quad_oy = qy % 2
-            stitch_quadrant_into_tile(
-                quad_img, tile_qx, tile_qy, quad_ox, quad_oy, test_gen
-            )
+            for dx, dy, ox, oy in [
+                (0, 0, 0, 0),
+                (-1, 0, 1, 0),
+                (0, -1, 0, 1),
+                (-1, -1, 1, 1),
+            ]:
+                tile_qx = qx + dx
+                tile_qy = qy + dy
+                try:
+                    stitch_quadrant_into_tile(
+                        quad_img, tile_qx, tile_qy, ox, oy, test_gen
+                    )
+                except OSError:
+                    pass
 
         traversal.mark_done([(q.x, q.y) for q in step.quadrants])
         completed_steps += 1

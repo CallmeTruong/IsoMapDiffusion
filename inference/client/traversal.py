@@ -236,20 +236,31 @@ def scan_generated_set(gen_dir: Path) -> set[tuple[int, int]]:
     if not gen_dir.exists():
         return out
 
+    import numpy as np
+    
     for f in gen_dir.glob("tile_*_*_*.png"):
         m = TILE_FILENAME_RE.match(f.name)
         if not m:
             continue
         tile_qx = _sign_int_to_int(m.group(1))
         tile_qy = _sign_int_to_int(m.group(2))
+        
         # Verify file is non-empty (avoid counting blank/failed tiles)
         if f.stat().st_size < 30 * 1024:  # 30KB threshold
             continue
-        # Tile chứa 4 quadrants
-        out.add((tile_qx * 2,     tile_qy * 2))
-        out.add((tile_qx * 2 + 1, tile_qy * 2))
-        out.add((tile_qx * 2,     tile_qy * 2 + 1))
-        out.add((tile_qx * 2 + 1, tile_qy * 2 + 1))
+            
+        try:
+            img = Image.open(f).convert("RGB")
+            arr = np.asarray(img, dtype=np.float32)
+            
+            # Check 4 quadrants inside this tile
+            for ox in (0, 1):
+                for oy in (0, 1):
+                    quad_arr = arr[oy*QUADRANT_SIZE:(oy+1)*QUADRANT_SIZE, ox*QUADRANT_SIZE:(ox+1)*QUADRANT_SIZE]
+                    if float(quad_arr.mean()) > 2.55: # > 1% of 255
+                        out.add((tile_qx + ox, tile_qy + oy))
+        except Exception:
+            continue
 
     return out
 
@@ -304,31 +315,47 @@ def _make_provider(
     cache = cache if cache is not None else {}
 
     def get_image(qx: int, qy: int) -> Optional[Image.Image]:
-        tile_qx = qx // 2
-        tile_qy = qy // 2
-        tile_key = (tile_qx, tile_qy)
-        if tile_key in cache:
-            full_tile = cache[tile_key]
-        else:
-            pattern = f"tile_{_sign_int(tile_qx)}_{_sign_int(tile_qy)}_*.png"
-            matches = list(dir_path.glob(pattern))
-            if not matches:
-                cache[tile_key] = None
-                return None
-            try:
-                full_tile = Image.open(matches[0]).convert("RGB")
-                if full_tile.size != (TEMPLATE_SIZE, TEMPLATE_SIZE):
-                    full_tile = full_tile.resize(
-                        (TEMPLATE_SIZE, TEMPLATE_SIZE),
-                        Image.Resampling.LANCZOS,
-                    )
-                cache[tile_key] = full_tile
-            except Exception:
-                cache[tile_key] = None
-                return None
-        if full_tile is None:
-            return None
-        return crop_quadrant(full_tile, qx, qy)
+        # Check all 4 overlapping tiles (offsets) that could contain this quadrant.
+        for dx, dy, ox, oy in [
+            (0, 0, 0, 0),
+            (-1, 0, 1, 0),
+            (0, -1, 0, 1),
+            (-1, -1, 1, 1),
+        ]:
+            tile_qx = qx + dx
+            tile_qy = qy + dy
+            tile_key = (tile_qx, tile_qy)
+            
+            if tile_key in cache:
+                full_tile = cache[tile_key]
+            else:
+                pattern = f"tile_{_sign_int(tile_qx)}_{_sign_int(tile_qy)}_*.png"
+                matches = list(dir_path.glob(pattern))
+                if not matches:
+                    continue
+                try:
+                    full_tile = Image.open(matches[0]).convert("RGB")
+                    if full_tile.size != (TEMPLATE_SIZE, TEMPLATE_SIZE):
+                        full_tile = full_tile.resize(
+                            (TEMPLATE_SIZE, TEMPLATE_SIZE),
+                            Image.Resampling.LANCZOS,
+                        )
+                    cache[tile_key] = full_tile
+                except Exception:
+                    continue
+                    
+            if full_tile is not None:
+                left = ox * QUADRANT_SIZE
+                top = oy * QUADRANT_SIZE
+                cropped = full_tile.crop((left, top, left + QUADRANT_SIZE, top + QUADRANT_SIZE))
+                
+                # Check if it has content (not just black)
+                import numpy as np
+                arr = np.asarray(cropped, dtype=np.float32)
+                if float(arr.mean()) > 2.55:
+                    return cropped
+                
+        return None
 
     return get_image
 

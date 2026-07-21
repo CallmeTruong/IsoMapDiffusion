@@ -43,7 +43,7 @@ def discover_tiles(gen_dir: Path, must_be_nonempty: bool = True):
         m = TILE_FILE_RE.match(f.name)
         if not m:
             continue
-        if must_be_nonempty and f.stat().st_size < 30 * 1024:
+        if must_be_nonempty and f.stat().st_size < 1024:
             continue
         qx, qy = int(m.group(1)), int(m.group(2))
         out[(qx, qy)] = f
@@ -92,17 +92,12 @@ def stitch_all(gen_dir: Path, output_path: Path,
 
     log.info(f"Output preview size: {width_px}x{height_px} (scale={scale:.2f})")
 
-    canvas = np.full((height_px, width_px, 3), background, dtype=np.float32)
-    weight = np.zeros((height_px, width_px), dtype=np.float32)
+    canvas = np.full((height_px, width_px, 3), background, dtype=np.uint8)
 
-    tile_weight = np.ones((tile_size_s, tile_size_s), dtype=np.float32)
-    edge = max(1, int(scale))
-    tile_weight[:edge] *= np.linspace(0.5, 1.0, edge).reshape(-1, 1)
-    tile_weight[-edge:] *= np.linspace(1.0, 0.5, edge).reshape(-1, 1)
-    tile_weight[:, :edge] *= np.linspace(0.5, 1.0, edge).reshape(1, -1)
-    tile_weight[:, -edge:] *= np.linspace(1.0, 0.5, edge).reshape(1, -1)
+    # Sort tiles by row (qy) then column (qx) for predictable top-down composition
+    sorted_tiles = sorted(tiles.items(), key=lambda item: (item[0][1], item[0][0]))
 
-    for (qx, qy), path in sorted(tiles.items()):
+    for (qx, qy), path in sorted_tiles:
         # Handle concurrent tile updates where pipeline renames old tile hash
         img_pil = None
         target_path = path
@@ -122,20 +117,17 @@ def stitch_all(gen_dir: Path, output_path: Path,
 
         if scale != 1.0 or img_pil.size != (TILE_SIZE, TILE_SIZE):
             img_pil = img_pil.resize((tile_size_s, tile_size_s), Image.Resampling.BILINEAR)
-        img = np.asarray(img_pil, dtype=np.float32)
+        img = np.asarray(img_pil, dtype=np.uint8)
 
         x0 = (qx - min_qx) * stride_s
         y0 = (qy - min_qy) * stride_s
         x1 = x0 + tile_size_s
         y1 = y0 + tile_size_s
 
-        for c in range(3):
-            canvas[y0:y1, x0:x1, c] += img[:, :, c] * tile_weight
-        weight[y0:y1, x0:x1] += tile_weight
-
-    weight = np.where(weight > 0, weight, 1.0)
-    canvas = canvas / weight[:, :, None]
-    canvas = np.clip(canvas, 0, 255).astype(np.uint8)
+        # Mask out black unrendered pixels (RGB <= 2) so they never wipe out valid content underneath
+        valid_mask = (img > 2).any(axis=2)
+        region = canvas[y0:y1, x0:x1]
+        region[valid_mask] = img[valid_mask]
 
     out_img = Image.fromarray(canvas)
     out_img.save(output_path, format="PNG", optimize=True)

@@ -180,30 +180,31 @@ def scan_done_from_disk(gen_dir: Path) -> set[tuple[int, int]]:
     done: set[tuple[int, int]] = set()
     if not gen_dir.exists():
         return done
-    for f in gen_dir.glob("tile_+*_+*_*.png"):
+        
+    import numpy as np
+    for f in gen_dir.glob("tile_*_*_*.png"):
         m = TILE_RE.match(f.name)
         if not m:
             continue
+            
+        if f.stat().st_size < 30 * 1024:
+            continue
+            
         try:
             tqx = int(m.group(1))
             tqy = int(m.group(2))
+            
+            img = Image.open(f).convert("RGB")
+            arr = np.asarray(img, dtype=np.float32)
+            
             for ox in (0, 1):
                 for oy in (0, 1):
-                    done.add((tqx * 2 + ox, tqy * 2 + oy))
-        except ValueError:
+                    quad_arr = arr[oy*QUADRANT_SIZE:(oy+1)*QUADRANT_SIZE, ox*QUADRANT_SIZE:(ox+1)*QUADRANT_SIZE]
+                    if float(quad_arr.mean()) > 2.55: # > 1% of 255
+                        done.add((tqx + ox, tqy + oy))
+        except Exception:
             continue
-    for f in gen_dir.glob("tile_-*_+*_*.png"):
-        m = TILE_RE.match(f.name)
-        if not m:
-            continue
-        try:
-            tqx = int(m.group(1))
-            tqy = int(m.group(2))
-            for ox in (0, 1):
-                for oy in (0, 1):
-                    done.add((tqx * 2 + ox, tqy * 2 + oy))
-        except ValueError:
-            continue
+            
     return done
 
 
@@ -658,7 +659,7 @@ async def run(args: argparse.Namespace) -> None:
                 failed_steps += 1
                 continue
 
-            edit_result = await client.edit(template, args.prompt, steps=args.steps)
+            edit_result = await client.edit(template, args.prompt, steps=args.steps, seed=args.seed)
             result_img = edit_result.image
             crops = crop_quadrants_from_output(result_img, step, placement)
 
@@ -669,19 +670,27 @@ async def run(args: argparse.Namespace) -> None:
                 # cache eviction in place of clearing the entire cache).
                 affected_tiles: set[tuple[int, int]] = set()
                 for (qx, qy), quad_img in crops.items():
-                    tile_qx = qx // 2
-                    tile_qy = qy // 2
-                    quad_ox = qx % 2
-                    quad_oy = qy % 2
-                    try:
-                        stitch_quadrant_into_tile(
-                            quad_img, tile_qx, tile_qy, quad_ox, quad_oy, gen_dir
-                        )
+                    quad_failed = False
+                    for dx, dy, ox, oy in [
+                        (0, 0, 0, 0),
+                        (-1, 0, 1, 0),
+                        (0, -1, 0, 1),
+                        (-1, -1, 1, 1),
+                    ]:
+                        tile_qx = qx + dx
+                        tile_qy = qy + dy
+                        try:
+                            stitch_quadrant_into_tile(
+                                quad_img, tile_qx, tile_qy, ox, oy, gen_dir
+                            )
+                            affected_tiles.add((tile_qx, tile_qy))
+                        except OSError as e:
+                            stitch_failed.append((qx, qy, str(e)))
+                            quad_failed = True
+                    
+                    if not quad_failed:
                         done_quadrants.add((qx, qy))
                         state["done_quadrants"][f"{qx},{qy}"] = True
-                        affected_tiles.add((tile_qx, tile_qy))
-                    except OSError as e:
-                        stitch_failed.append((qx, qy, str(e)))
 
                 if stitch_failed:
                     # Stitch failed -> revert mark_done
@@ -788,6 +797,8 @@ def parse_args() -> argparse.Namespace:
                    help="Edit prompt -- default: from src.constants.DEFAULT_PROMPT.")
     p.add_argument("--steps", type=int, default=None,
                    help="Inference steps (default: from INFERENCE_STEPS env var or 14).")
+    p.add_argument("--seed", type=int, default=None,
+                   help="Fixed seed for generation determinism (default: None for server random).")
     p.add_argument("--min-qx", type=int, default=None,
                    help="Filter tiles: minimum qx coordinate (inclusive).")
     p.add_argument("--max-qx", type=int, default=None,
