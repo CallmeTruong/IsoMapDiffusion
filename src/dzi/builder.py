@@ -73,7 +73,7 @@ def composite_strip(tiles_info, canvas_w, strip_y0, strip_y1, strip_height):
         t for t in tiles_info
         if os.path.exists(t['path'])
         and t['y'] < strip_y1
-        and t['y'] + t.get('height', 512) > strip_y0
+        and t['y'] + t.get('height', 1024) > strip_y0
     ]
 
     background = pyvips.Image.black(canvas_w, strip_h, bands=4).copy(interpretation='srgb')
@@ -88,6 +88,13 @@ def composite_strip(tiles_info, canvas_w, strip_y0, strip_y1, strip_height):
             img = img.addalpha()
         if img.interpretation != 'srgb':
             img = img.colourspace('srgb')
+
+        # Make unrendered black pixels (RGB <= 2) transparent (alpha = 0)
+        # so they never overwrite valid content underneath in DZI composite.
+        non_black = (img[0] > 2) | (img[1] > 2) | (img[2] > 2)
+        alpha = non_black.ifthenelse(img[3], 0)
+        img = img[0:3].bandjoin(alpha)
+
         images.append(img)
         xs.append(t['x'])
         ys.append(t['y'] - strip_y0)
